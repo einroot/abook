@@ -295,6 +295,27 @@ class TtsEngine(private val context: Context) {
                 currentChunkText = StringBuilder()
             }
 
+            // If a single sentence exceeds maxChunkSize, force-split it at word boundaries
+            if (sentence.length > maxChunkSize) {
+                if (currentChunkText.isNotEmpty()) {
+                    chunks.add(TextChunk(currentChunkText.toString(), currentChunkStart))
+                    currentChunkText = StringBuilder()
+                }
+                var pos = 0
+                while (pos < sentence.length) {
+                    val end = (pos + maxChunkSize).coerceAtMost(sentence.length)
+                    val splitAt = if (end < sentence.length) {
+                        val lastSpace = sentence.lastIndexOf(' ', end - 1)
+                        if (lastSpace > pos) lastSpace + 1 else end
+                    } else end
+                    chunks.add(TextChunk(sentence.substring(pos, splitAt), charOffset + pos))
+                    pos = splitAt
+                }
+                charOffset += sentence.length
+                currentChunkStart = charOffset
+                continue
+            }
+
             if (currentChunkText.isNotEmpty()) {
                 currentChunkText.append(" ")
                 charOffset++
