@@ -138,17 +138,21 @@ class TtsPlaybackService : Service() {
 
             bookDao.updateLastOpened(bookId, System.currentTimeMillis())
 
-            // Use original text lengths for global offset tracking (totalBookChars)
-            // since we only need rough proportions for book-level progress bar.
             val totalChars = chapters.sumOf { it.textContent.length.toLong() }
-            val currentGlobalOffset = chapters.take(currentChapterIndex)
-                .sumOf { it.textContent.length.toLong() } + charOffset
 
             val currentChapter = chapters.getOrNull(currentChapterIndex)
             val processedLen = currentChapter?.let {
                 TextProcessor.DEFAULT.process(it.textContent).length
             } ?: 0
             currentProcessedTextLength = processedLen
+
+            // charOffset is in processed-text space (from saved position).
+            // Scale to original space for consistent book-level progress.
+            val originalLen = currentChapter?.textContent?.length?.coerceAtLeast(1) ?: 1
+            val pLen = processedLen.coerceAtLeast(1)
+            val scaledCharOffset = charOffset.toLong() * originalLen / pLen
+            val currentGlobalOffset = chapters.take(currentChapterIndex)
+                .sumOf { it.textContent.length.toLong() } + scaledCharOffset
 
             _playbackState.value = PlaybackState(
                 isPlaying = true,
