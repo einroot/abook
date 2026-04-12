@@ -130,42 +130,37 @@ fun VoicePickerDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
-                LazyColumn(
+                androidx.compose.foundation.lazy.LazyRow(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+                        .padding(vertical = 4.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     item {
-                        androidx.compose.foundation.lazy.LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            item {
-                                AssistChip(
-                                    onClick = {
-                                        selectedLanguageFilter = null
-                                        onLanguageFilterChange(null)
-                                    },
-                                    label = { Text("Все") },
-                                    leadingIcon = if (selectedLanguageFilter == null) {
-                                        { Icon(Icons.Default.Check, contentDescription = null) }
-                                    } else null
-                                )
-                            }
-                            items(languages) { lang ->
-                                AssistChip(
-                                    onClick = {
-                                        val next = if (selectedLanguageFilter == lang) null else lang
-                                        selectedLanguageFilter = next
-                                        onLanguageFilterChange(next)
-                                    },
-                                    label = { Text(lang) },
-                                    leadingIcon = if (selectedLanguageFilter == lang) {
-                                        { Icon(Icons.Default.Check, contentDescription = null) }
-                                    } else null
-                                )
-                            }
-                        }
+                        AssistChip(
+                            onClick = {
+                                selectedLanguageFilter = null
+                                onLanguageFilterChange(null)
+                            },
+                            label = { Text("Все") },
+                            leadingIcon = if (selectedLanguageFilter == null) {
+                                { Icon(Icons.Default.Check, contentDescription = null) }
+                            } else null
+                        )
+                    }
+                    items(languages) { lang ->
+                        AssistChip(
+                            onClick = {
+                                val next = if (selectedLanguageFilter == lang) null else lang
+                                selectedLanguageFilter = next
+                                onLanguageFilterChange(next)
+                            },
+                            label = { Text(lang) },
+                            leadingIcon = if (selectedLanguageFilter == lang) {
+                                { Icon(Icons.Default.Check, contentDescription = null) }
+                            } else null
+                        )
                     }
                 }
 

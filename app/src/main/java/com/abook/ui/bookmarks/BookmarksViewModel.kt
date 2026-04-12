@@ -28,7 +28,6 @@ class BookmarksViewModel @Inject constructor(
 ) : ViewModel() {
 
     enum class SortMode { NEWEST, OLDEST, BY_BOOK, BY_CHAPTER }
-    enum class ViewMode { ALL, BY_CURRENT_BOOK }
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery
