@@ -349,11 +349,10 @@ fun VoiceSettingsScreen(
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            if (profileName.isNotBlank()) {
-                                viewModel.saveProfile(profileName)
-                                showSaveDialog = false
-                            }
-                        }
+                            viewModel.saveProfile(profileName.trim())
+                            showSaveDialog = false
+                        },
+                        enabled = profileName.isNotBlank()
                     ) { Text("Сохранить") }
                 },
                 dismissButton = {
