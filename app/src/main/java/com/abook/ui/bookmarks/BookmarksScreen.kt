@@ -137,18 +137,7 @@ fun BookmarksScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = { viewModel.setSearchQuery(it) },
-                label = { Text("Поиск по меткам и книгам") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                singleLine = true
-            )
-
-            if (bookmarks.isEmpty()) {
+            if (bookmarks.isEmpty() && query.isBlank()) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
@@ -174,8 +163,18 @@ fun BookmarksScreen(
                     }
                 }
             } else {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { viewModel.setSearchQuery(it) },
+                    label = { Text("Поиск по меткам и книгам") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    singleLine = true
+                )
                 Text(
-                    "Всего: ${bookmarks.size}",
+                    "Найдено: ${bookmarks.size}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
