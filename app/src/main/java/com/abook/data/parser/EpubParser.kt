@@ -203,20 +203,22 @@ class EpubParser : BookParser {
     ): List<ParsedChapter> {
         val tocMap = toc.associateBy { it.href.substringBefore("#") }
         val chapters = mutableListOf<ParsedChapter>()
+        var chapterCounter = 0  // Counts actual non-blank chapters, not spine position
 
-        spine.forEachIndexed { index, idref ->
-            val item = manifest[idref] ?: return@forEachIndexed
+        spine.forEach { idref ->
+            val item = manifest[idref] ?: return@forEach
             val itemPath = resolvePath(opfDir, item.href)
-            val contentBytes = entries[itemPath] ?: return@forEachIndexed
+            val contentBytes = entries[itemPath] ?: return@forEach
 
             val html = String(contentBytes, Charsets.UTF_8)
             val doc = Jsoup.parse(html)
             val text = extractText(doc)
-            if (text.isBlank()) return@forEachIndexed
+            if (text.isBlank()) return@forEach
 
+            chapterCounter++
             val title = tocMap[item.href]?.title
                 ?: tocMap[item.href.substringAfterLast("/")]?.title
-                ?: "Глава ${index + 1}"
+                ?: "Глава $chapterCounter"
             chapters.add(ParsedChapter(title, text))
         }
         return chapters

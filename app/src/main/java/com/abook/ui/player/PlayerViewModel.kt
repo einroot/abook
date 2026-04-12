@@ -129,7 +129,11 @@ class PlayerViewModel @Inject constructor(
      * Positive seconds seek forward, negative — backward.
      */
     fun seekBySeconds(seconds: Int) {
-        val chars = seconds * 15
+        // 15 chars/sec at 1.0× speed (230 WPM × 5.5 chars / 60 ≈ 21, but TTS
+        // pauses between chunks make effective throughput ~15 chars/sec).
+        // Scale by speechRate so "30 seconds" at 2× actually skips 2× more text.
+        val rate = _speechRate.value.coerceAtLeast(0.1f)
+        val chars = (seconds * 15 * rate).toInt()
         service?.seekByCharOffset(chars)
     }
     fun seekToBookProgress(progress: Float) = service?.seekToBookProgress(progress)
