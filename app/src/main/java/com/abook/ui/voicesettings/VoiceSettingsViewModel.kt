@@ -194,6 +194,7 @@ class VoiceSettingsViewModel @Inject constructor(
                 selectedVoiceName = voiceName,
                 selectedLocale = ttsEngine?.getCurrentVoice()?.locale
             )
+            applyLivePlaybackChanges()
         }
     }
 
@@ -205,6 +206,7 @@ class VoiceSettingsViewModel @Inject constructor(
             selectedLocale = locale,
             availableVoices = ttsEngine?.getAvailableVoices() ?: emptyList()
         )
+        applyLivePlaybackChanges()
     }
 
     // --- Equalizer ---
@@ -268,6 +270,7 @@ class VoiceSettingsViewModel @Inject constructor(
     fun setSsmlEnabled(enabled: Boolean) {
         ttsEngine?.setSsmlEnabled(enabled)
         _uiState.value = _uiState.value.copy(useSsml = enabled)
+        applyLivePlaybackChanges()
     }
 
     fun setSsmlPauseMs(ms: Int) {
@@ -314,31 +317,54 @@ class VoiceSettingsViewModel @Inject constructor(
     }
 
     fun loadProfile(profile: VoiceProfileEntity) {
-        setSpeechRate(profile.speechRate)
-        setPitch(profile.pitch)
-        setVolume(profile.volume)
-        setPan(profile.pan)
-        profile.voiceName?.let { selectVoice(it) }
+        // Apply TTS params directly without triggering individual resyncs.
+        // We'll do ONE resync at the end to avoid rapid stop/start stuttering.
+        ttsEngine?.setSpeechRate(profile.speechRate)
+        ttsEngine?.setPitch(profile.pitch)
+        ttsEngine?.setVolume(profile.volume)
+        ttsEngine?.setPan(profile.pan)
+        profile.voiceName?.let { ttsEngine?.setVoice(it) }
         profile.locale?.let {
-            try { selectLocale(Locale.forLanguageTag(it)) } catch (_: Exception) {}
+            try { ttsEngine?.setLanguage(Locale.forLanguageTag(it)) } catch (_: Exception) {}
         }
+        ttsEngine?.setSsmlEnabled(profile.useSsml)
+        ttsEngine?.setSsmlPauseMs(profile.ssmlPauseBetweenSentencesMs)
 
+        // Apply audio effects (these are live via DSP, no resync needed)
         if (profile.equalizerPreset >= 0) {
-            setEqualizerPreset(profile.equalizerPreset)
+            audioEffects?.setEqualizerPreset(profile.equalizerPreset)
         } else if (profile.equalizerBandLevels.isNotBlank()) {
             profile.equalizerBandLevels.split(",").forEachIndexed { band, level ->
-                level.toIntOrNull()?.let { setEqualizerBandLevel(band, it) }
+                level.toIntOrNull()?.let { audioEffects?.setEqualizerBandLevel(band, it) }
             }
         }
+        audioEffects?.setBassBoostStrength(profile.bassBoostStrength)
+        audioEffects?.setVirtualizerStrength(profile.virtualizerStrength)
+        audioEffects?.setPresetReverb(profile.reverbPreset.toShort())
+        audioEffects?.setLoudnessGain(profile.loudnessGain)
 
-        setBassBoost(profile.bassBoostStrength)
-        setVirtualizer(profile.virtualizerStrength)
-        setReverbPreset(profile.reverbPreset)
-        setLoudness(profile.loudnessGain)
-        setSsmlEnabled(profile.useSsml)
-        setSsmlPauseMs(profile.ssmlPauseBetweenSentencesMs)
+        // Update UI state in one shot
+        _uiState.value = _uiState.value.copy(
+            speechRate = profile.speechRate,
+            pitch = profile.pitch,
+            volume = profile.volume,
+            pan = profile.pan,
+            selectedVoiceName = profile.voiceName ?: _uiState.value.selectedVoiceName,
+            selectedLocale = profile.locale?.let {
+                try { Locale.forLanguageTag(it) } catch (_: Exception) { null }
+            } ?: _uiState.value.selectedLocale,
+            equalizerInfo = audioEffects?.getEqualizerInfo(),
+            bassBoostStrength = profile.bassBoostStrength,
+            virtualizerStrength = profile.virtualizerStrength,
+            reverbPreset = profile.reverbPreset,
+            loudnessGain = profile.loudnessGain,
+            useSsml = profile.useSsml,
+            ssmlPauseMs = profile.ssmlPauseBetweenSentencesMs,
+            activeProfileId = profile.id
+        )
 
-        _uiState.value = _uiState.value.copy(activeProfileId = profile.id)
+        // Single resync to apply all TTS changes at once
+        applyLivePlaybackChanges()
     }
 
     fun deleteProfile(profile: VoiceProfileEntity) {
