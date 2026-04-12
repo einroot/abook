@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -40,7 +42,17 @@ fun ChapterListScreen(
             TopAppBar(title = { Text("Оглавление") })
         }
     ) { paddingValues ->
+        val listState = rememberLazyListState()
+
+        // Auto-scroll to current chapter when screen opens
+        LaunchedEffect(currentIndex) {
+            if (currentIndex > 0) {
+                listState.animateScrollToItem(currentIndex)
+            }
+        }
+
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
