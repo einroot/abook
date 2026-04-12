@@ -137,18 +137,19 @@ class TtsPlaybackService : Service() {
             val currentGlobalOffset = chapters.take(currentChapterIndex)
                 .sumOf { it.textContent.length.toLong() } + charOffset
 
+            val currentChapter = chapters.getOrNull(currentChapterIndex)
             _playbackState.value = PlaybackState(
                 isPlaying = true,
                 bookId = bookId,
                 bookTitle = book.title,
                 chapterIndex = currentChapterIndex,
-                chapterTitle = chapters[currentChapterIndex].title,
+                chapterTitle = currentChapter?.title.orEmpty(),
                 totalChapters = chapters.size,
                 charOffsetInChapter = charOffset,
-                chapterLength = chapters[currentChapterIndex].textContent.length,
+                chapterLength = currentChapter?.textContent?.length ?: 0,
                 totalBookChars = totalChars,
                 currentBookCharOffset = currentGlobalOffset,
-                currentChapterText = chapters[currentChapterIndex].textContent,
+                currentChapterText = currentChapter?.textContent.orEmpty(),
                 coverPath = book.coverPath
             )
 
@@ -222,6 +223,7 @@ class TtsPlaybackService : Service() {
     }
 
     fun nextChapter() {
+        if (chapters.isEmpty()) return
         if (currentChapterIndex < chapters.size - 1) {
             val wasPlaying = _playbackState.value.isPlaying
             ttsEngine.stop()
@@ -232,6 +234,7 @@ class TtsPlaybackService : Service() {
     }
 
     fun prevChapter() {
+        if (chapters.isEmpty()) return
         if (currentChapterIndex > 0) {
             val wasPlaying = _playbackState.value.isPlaying
             ttsEngine.stop()
@@ -252,6 +255,7 @@ class TtsPlaybackService : Service() {
     }
 
     fun seekByCharOffset(offsetDelta: Int) {
+        if (chapters.isEmpty()) return
         val state = _playbackState.value
         val newOffset = (state.charOffsetInChapter + offsetDelta).coerceIn(0, state.chapterLength)
         val globalOffset = chapters.take(currentChapterIndex)
@@ -270,6 +274,7 @@ class TtsPlaybackService : Service() {
     }
 
     fun seekToAbsoluteCharOffset(offset: Int) {
+        if (chapters.isEmpty()) return
         val state = _playbackState.value
         val clamped = offset.coerceIn(0, state.chapterLength)
         val globalOffset = chapters.take(currentChapterIndex)
@@ -315,6 +320,7 @@ class TtsPlaybackService : Service() {
     }
 
     fun seekBackOneSentence() {
+        if (chapters.isEmpty()) return
         val state = _playbackState.value
         val chapter = chapters.getOrNull(currentChapterIndex) ?: return
         val text = chapter.textContent
@@ -689,6 +695,13 @@ class TtsPlaybackService : Service() {
 
     override fun onDestroy() {
         savePosition()
+        // Clear callbacks to prevent stale closure access after destruction
+        sleepTimerManager.onVolumeChange = null
+        sleepTimerManager.onTimerExpired = null
+        ttsEngine.onUtteranceStart = null
+        ttsEngine.onUtteranceDone = null
+        ttsEngine.onUtteranceError = null
+        ttsEngine.onRangeStart = null
         sleepTimerManager.release()
         audioEffects.release()
         ttsEngine.shutdown()

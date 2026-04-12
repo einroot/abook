@@ -77,7 +77,7 @@ class VoiceSettingsViewModel @Inject constructor(
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            val localBinder = binder as TtsPlaybackService.LocalBinder
+            val localBinder = binder as? TtsPlaybackService.LocalBinder ?: return
             service = localBinder.getService()
             ttsEngine = service?.getTtsEngine()
             audioEffects = service?.getAudioEffectsManager()
@@ -309,7 +309,9 @@ class VoiceSettingsViewModel @Inject constructor(
         setVolume(profile.volume)
         setPan(profile.pan)
         profile.voiceName?.let { selectVoice(it) }
-        profile.locale?.let { selectLocale(Locale.forLanguageTag(it)) }
+        profile.locale?.let {
+            try { selectLocale(Locale.forLanguageTag(it)) } catch (_: Exception) {}
+        }
 
         if (profile.equalizerPreset >= 0) {
             setEqualizerPreset(profile.equalizerPreset)

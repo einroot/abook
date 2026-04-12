@@ -51,7 +51,7 @@ class PlayerViewModel @Inject constructor(
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            val localBinder = binder as TtsPlaybackService.LocalBinder
+            val localBinder = binder as? TtsPlaybackService.LocalBinder ?: return
             service = localBinder.getService()
             isBound = true
 
