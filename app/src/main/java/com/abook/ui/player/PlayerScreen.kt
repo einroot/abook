@@ -401,8 +401,11 @@ fun PlayerScreen(
 
         // Sleep timer bottom sheet
         if (showSleepTimerSheet) {
-            // Custom value persists across sheet open/close while it's in composition
-            var customMinutes by remember { mutableStateOf(30) }
+            // Initialize to current remaining time if timer is active, otherwise 30
+            val initialMinutes = if (sleepTimerState.isActive) {
+                (sleepTimerState.remainingSeconds / 60).coerceAtLeast(1)
+            } else 30
+            var customMinutes by remember(showSleepTimerSheet) { mutableStateOf(initialMinutes) }
             ModalBottomSheet(onDismissRequest = { showSleepTimerSheet = false }) {
                 Column(
                     modifier = Modifier

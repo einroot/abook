@@ -456,8 +456,14 @@ class TtsPlaybackService : Service() {
 
         val globalChapterOffset = chunkCharOffset + start
         val globalChapterEnd = chunkCharOffset + end
+
+        // Scale processed-text offset to original-text space for book-level progress.
+        // totalBookChars uses original lengths, so book progress must be in the same space.
+        val originalLen = chapters.getOrNull(currentChapterIndex)?.textContent?.length ?: 1
+        val processedLen = currentProcessedTextLength.coerceAtLeast(1)
+        val scaledChapterOffset = (globalChapterOffset.toLong() * originalLen / processedLen)
         val globalBookOffset = chapters.take(currentChapterIndex)
-            .sumOf { it.textContent.length.toLong() } + globalChapterOffset
+            .sumOf { it.textContent.length.toLong() } + scaledChapterOffset
 
         _playbackState.value = _playbackState.value.copy(
             charOffsetInChapter = globalChapterOffset,
