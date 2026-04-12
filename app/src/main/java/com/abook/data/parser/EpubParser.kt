@@ -7,6 +7,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.parser.Parser
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import java.io.InputStream
 import java.util.zip.ZipInputStream
 
@@ -40,6 +41,9 @@ class EpubParser : BookParser {
 
     private fun parseInternal(inputStream: InputStream, fileName: String): ParsedBook {
         val bytes = inputStream.readBytes()
+        if (bytes.size > 200 * 1024 * 1024) {
+            throw IOException("EPUB file too large (${bytes.size / 1024 / 1024} MB). Maximum 200 MB.")
+        }
         val entries = readZipEntries(bytes)
 
         val opfPath = findOpfPath(entries)

@@ -72,7 +72,12 @@ class Fb2Parser : BookParser {
         }
 
         val finalChapters = if (chapters.isEmpty()) {
-            listOf(ParsedChapter("Глава 1", String(bytes, charset)))
+            // Don't use raw XML bytes as text — strip all tags as last resort
+            val rawText = String(bytes, charset)
+                .replace(Regex("<[^>]+>"), " ")
+                .replace(Regex("\\s{2,}"), " ")
+                .trim()
+            listOf(ParsedChapter("Глава 1", rawText))
         } else chapters
 
         return ParsedBook(

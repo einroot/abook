@@ -185,6 +185,7 @@ class TtsPlaybackService : Service() {
 
         currentChunkIndex = containingIdx
 
+        var anyQueued = false
         for (i in containingIdx until currentChunks.size) {
             val chunk = currentChunks[i]
             val (speakText, speakOffset) = if (i == containingIdx) {
@@ -198,6 +199,19 @@ class TtsPlaybackService : Service() {
             }
             val utteranceId = "$currentBookId:$chapterIndex:$speakOffset"
             ttsEngine.speak(speakText, utteranceId)
+            anyQueued = true
+        }
+
+        // If nothing was queued (offset past end of text), auto-advance to next chapter
+        if (!anyQueued && _playbackState.value.isPlaying) {
+            if (currentChapterIndex < chapters.size - 1) {
+                currentChapterIndex++
+                updateChapterState()
+                speakChapter(currentChapterIndex)
+                return
+            } else {
+                pause()
+            }
         }
 
         updateMediaSession()
@@ -459,7 +473,7 @@ class TtsPlaybackService : Service() {
     // --- Sleep timer ---
 
     fun startSleepTimer(minutes: Int) {
-        sleepTimerManager.start(minutes, _playbackState.value.let { 1.0f })
+        sleepTimerManager.start(minutes, ttsEngine.getCurrentVolume())
     }
 
     fun extendSleepTimer(minutes: Int = 15) {
