@@ -47,11 +47,11 @@ class EpubParser : BookParser {
         val entries = readZipEntries(bytes)
 
         val opfPath = findOpfPath(entries)
-            ?: throw IllegalStateException("Invalid EPUB: no OPF found")
+            ?: throw IOException("Некорректный EPUB: не найден OPF-файл (META-INF/container.xml отсутствует или повреждён)")
         val opfDir = opfPath.substringBeforeLast("/", "")
 
         val opfBytes = entries[opfPath]
-            ?: throw IllegalStateException("OPF file not found in archive")
+            ?: throw IOException("Некорректный EPUB: OPF-файл ($opfPath) не найден в архиве")
         val opfDoc = Jsoup.parse(String(opfBytes, Charsets.UTF_8), "", Parser.xmlParser())
 
         val metadata = parseMetadata(opfDoc)
