@@ -55,7 +55,7 @@ class LibraryViewModel @Inject constructor(
         when (sort) {
             SortMode.RECENT -> filtered.sortedByDescending { it.lastOpenedAt ?: it.addedAt }
             SortMode.TITLE -> filtered.sortedBy { it.title }
-            SortMode.AUTHOR -> filtered.sortedBy { it.author }
+            SortMode.AUTHOR -> filtered.sortedBy { it.author.ifBlank { "\uFFFF" } }  // blank authors last
             SortMode.DATE_ADDED -> filtered.sortedByDescending { it.addedAt }
         }
     }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())

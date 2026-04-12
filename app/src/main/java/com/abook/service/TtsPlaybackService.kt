@@ -113,6 +113,9 @@ class TtsPlaybackService : Service() {
 
         ttsEngine.onUtteranceError = { utteranceId ->
             Log.e(TAG, "Utterance error: $utteranceId")
+            // Treat error same as done — advance to next chunk/chapter
+            // so playback doesn't silently freeze on TTS failures
+            onUtteranceDone(utteranceId)
         }
     }
 
@@ -625,8 +628,11 @@ class TtsPlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Route media button intents through MediaButtonReceiver
-        MediaButtonReceiver.handleIntent(mediaSession, intent)
+        // Route media button intents through MediaButtonReceiver (only for actual
+        // media button intents, not our own action intents or null restarts)
+        if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
+            MediaButtonReceiver.handleIntent(mediaSession, intent)
+        }
         return handleCommand(intent, startId)
     }
 
