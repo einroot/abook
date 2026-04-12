@@ -329,7 +329,8 @@ fun PlayerScreen(
                 ) {
                     FilledTonalIconButton(
                         onClick = { viewModel.togglePlayPause() },
-                        modifier = Modifier.size(60.dp)
+                        modifier = Modifier.size(60.dp),
+                        enabled = playbackState.bookId != null
                     ) {
                         Icon(
                             if (playbackState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,

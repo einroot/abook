@@ -166,12 +166,13 @@ class PlayerViewModel @Inject constructor(
     fun estimateRemainingTime(): String {
         val state = _playbackState.value
         val remainingChars = state.totalBookChars - state.currentBookCharOffset
-        if (remainingChars <= 0) return "0м"
+        if (remainingChars <= 0) return "готово"
         val rate = _speechRate.value.coerceAtLeast(0.1f)
         val baseWpm = 230f
         val effectiveWpm = baseWpm * rate
         val charsPerMinute = effectiveWpm * 5.5f
         val minutes = (remainingChars / charsPerMinute).toInt()
+        if (minutes == 0) return "<1м"
         val hours = minutes / 60
         val mins = minutes % 60
         return if (hours > 0) "${hours}ч ${mins}м" else "${mins}м"
