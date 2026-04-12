@@ -304,7 +304,9 @@ class VoiceSettingsViewModel @Inject constructor(
                 bassBoostStrength = state.bassBoostStrength,
                 virtualizerStrength = state.virtualizerStrength,
                 useSsml = state.useSsml,
-                ssmlPauseBetweenSentencesMs = state.ssmlPauseMs
+                ssmlPauseBetweenSentencesMs = state.ssmlPauseMs,
+                reverbPreset = state.reverbPreset,
+                loudnessGain = state.loudnessGain
             )
             val id = voiceProfileDao.insert(entity)
             _uiState.value = state.copy(activeProfileId = id)
@@ -331,6 +333,8 @@ class VoiceSettingsViewModel @Inject constructor(
 
         setBassBoost(profile.bassBoostStrength)
         setVirtualizer(profile.virtualizerStrength)
+        setReverbPreset(profile.reverbPreset)
+        setLoudness(profile.loudnessGain)
         setSsmlEnabled(profile.useSsml)
         setSsmlPauseMs(profile.ssmlPauseBetweenSentencesMs)
 

@@ -19,5 +19,7 @@ data class VoiceProfileEntity(
     val virtualizerStrength: Int = 0,
     val useSsml: Boolean = false,
     val ssmlPauseBetweenSentencesMs: Int = 300,
+    val reverbPreset: Int = 0,
+    val loudnessGain: Int = 0,
     val isDefault: Boolean = false
 )

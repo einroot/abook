@@ -25,7 +25,7 @@ import com.abook.data.db.entity.VoiceProfileEntity
         BookmarkEntity::class,
         ListeningSessionEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class ABookDatabase : RoomDatabase() {
