@@ -47,11 +47,14 @@ object AbbreviationExpander {
         "St." to "Saint"
     )
 
+    // Pre-compiled regex patterns for each abbreviation (compiled once, reused)
+    private val compiledPatterns: List<Pair<Regex, String>> = abbreviations.map { (abbr, expansion) ->
+        Regex("""(?<![a-zA-Zа-яА-ЯёЁ])${Regex.escape(abbr)}(?![a-zA-Zа-яА-ЯёЁ])""") to expansion
+    }
+
     fun expand(text: String): String {
         var result = text
-        for ((abbr, expansion) in abbreviations) {
-            // Match the abbreviation as a standalone token
-            val pattern = Regex("""(?<![a-zA-Zа-яА-ЯёЁ])${Regex.escape(abbr)}(?![a-zA-Zа-яА-ЯёЁ])""")
+        for ((pattern, expansion) in compiledPatterns) {
             result = pattern.replace(result, expansion)
         }
         return result

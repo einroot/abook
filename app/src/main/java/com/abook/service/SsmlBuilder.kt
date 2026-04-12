@@ -33,7 +33,7 @@ object SsmlBuilder {
             for ((word, pron) in config.pronunciations) {
                 processed = processed.replace(
                     Regex("""\b${Regex.escape(word)}\b"""),
-                    "<phoneme alphabet=\"ipa\" ph=\"${escapeXml(pron)}\">$word</phoneme>"
+                    "<phoneme alphabet=\"ipa\" ph=\"${escapeXml(pron)}\">${escapeXml(word)}</phoneme>"
                 )
             }
 
