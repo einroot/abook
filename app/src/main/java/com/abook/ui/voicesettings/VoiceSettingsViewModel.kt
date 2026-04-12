@@ -92,9 +92,17 @@ class VoiceSettingsViewModel @Inject constructor(
     }
 
     init {
-        val intent = Intent(context, TtsPlaybackService::class.java)
-        context.startService(intent)
-        context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        try {
+            val intent = Intent(context, TtsPlaybackService::class.java)
+            try {
+                context.startForegroundService(intent)
+            } catch (_: Exception) {
+                context.startService(intent)
+            }
+            context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun loadCurrentState() {

@@ -132,10 +132,11 @@ fun PlayerScreen(
 
     LaunchedEffect(bookId) {
         if (bookId != null) {
-            // Wait a tick so the service binding can deliver the current state
-            // before we decide whether to (re)start playback.
-            kotlinx.coroutines.delay(100)
-            if (playbackState.bookId != bookId) {
+            // Wait for service binding to deliver current playback state
+            kotlinx.coroutines.delay(200)
+            // Re-read state from ViewModel (not stale closure) to check accurately
+            val currentBookId = viewModel.playbackState.value.bookId
+            if (currentBookId != bookId) {
                 viewModel.playBook(bookId)
             }
         }
