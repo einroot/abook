@@ -342,17 +342,21 @@ class TtsPlaybackService : Service() {
         var acc = 0L
         for ((i, ch) in chapters.withIndex()) {
             if (acc + ch.textContent.length >= target) {
-                val localOffset = (target - acc).toInt()
+                val localOffsetOriginal = (target - acc).toInt()
                 currentChapterIndex = i
-                // Update chapter state first
                 updateChapterState()
-                // Then set the precise offset (updateChapterState resets to 0)
-                val globalOffset = chapters.take(i).sumOf { c -> c.textContent.length.toLong() } + localOffset
+
+                // Convert original-text offset to processed-text offset
+                val originalLen = ch.textContent.length.coerceAtLeast(1)
+                val processedLen = currentProcessedTextLength.coerceAtLeast(1)
+                val localOffsetProcessed = (localOffsetOriginal.toLong() * processedLen / originalLen).toInt()
+
+                val globalOffset = chapters.take(i).sumOf { c -> c.textContent.length.toLong() } + localOffsetOriginal
                 _playbackState.value = _playbackState.value.copy(
-                    charOffsetInChapter = localOffset,
+                    charOffsetInChapter = localOffsetProcessed,
                     currentBookCharOffset = globalOffset
                 )
-                if (wasPlaying) speakChapter(i, localOffset)
+                if (wasPlaying) speakChapter(i, localOffsetProcessed)
                 return
             }
             acc += ch.textContent.length
