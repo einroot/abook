@@ -37,12 +37,17 @@ class AutoMediaBrowserService : MediaBrowserServiceCompat() {
     ) {
         result.detach()
         scope.launch {
-            val items: List<MediaBrowserCompat.MediaItem> = when {
-                parentId == ROOT_ID -> loadBooks()
-                parentId.startsWith(BOOK_PREFIX) -> loadChapters(parentId.removePrefix(BOOK_PREFIX))
-                else -> emptyList()
+            try {
+                val items: List<MediaBrowserCompat.MediaItem> = when {
+                    parentId == ROOT_ID -> loadBooks()
+                    parentId.startsWith(BOOK_PREFIX) -> loadChapters(parentId.removePrefix(BOOK_PREFIX))
+                    else -> emptyList()
+                }
+                result.sendResult(items)
+            } catch (e: Exception) {
+                // Client may have disconnected before result was ready
+                try { result.sendResult(emptyList()) } catch (_: Exception) {}
             }
-            result.sendResult(items)
         }
     }
 
