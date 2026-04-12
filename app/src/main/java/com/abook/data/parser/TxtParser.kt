@@ -19,7 +19,7 @@ class TxtParser : BookParser {
         Regex("""(?m)^\s*(?:ЧАСТЬ|Часть|часть)\s+(?:\d+|[IVXLCDM]+|[А-Яа-я]+)[.\s:].*$"""),
         Regex("""(?m)^\s*(?:PART|Part|part)\s+(?:\d+|[IVXLCDM]+|[A-Za-z]+)[.\s:].*$"""),
         Regex("""(?m)^\s*(?:\d+|[IVXLCDM]+)\.\s+[A-ZА-ЯЁ].*$"""),
-        Regex("""(?m)^\s*[A-ZА-ЯЁ][A-ZА-ЯЁ\s\d.,!?:;\-]{2,79}\s*$""")
+        Regex("""(?m)^\s*[A-ZА-ЯЁ][A-ZА-ЯЁ\s\d:;\-]{5,79}\s*$""")
     )
 
     override suspend fun parse(inputStream: InputStream, fileName: String): ParsedBook =
@@ -63,14 +63,8 @@ class TxtParser : BookParser {
             }
         }
 
-        // Try UTF-8 validity check
-        val utf8 = try {
-            val decoded = String(bytes, Charsets.UTF_8)
-            if (!decoded.contains('\uFFFD')) return Charsets.UTF_8 to 0
-            decoded
-        } catch (_: Exception) {
-            null
-        }
+        // Try UTF-8 validity check — scan bytes directly without full String allocation
+        if (isValidUtf8(bytes)) return Charsets.UTF_8 to 0
 
         // Frequency analysis for Windows-1251 vs KOI8-R
         var win1251 = 0
@@ -85,6 +79,32 @@ class TxtParser : BookParser {
         } else {
             try { Charset.forName("windows-1251") to 0 } catch (_: Exception) { Charsets.UTF_8 to 0 }
         }
+    }
+
+    /**
+     * Validate UTF-8 by scanning bytes directly without creating a full String.
+     * Returns true if all bytes form valid UTF-8 sequences.
+     */
+    private fun isValidUtf8(bytes: ByteArray): Boolean {
+        var i = 0
+        // Only check first 8KB for speed on large files
+        val limit = minOf(bytes.size, 8192)
+        while (i < limit) {
+            val b = bytes[i].toInt() and 0xFF
+            val seqLen = when {
+                b <= 0x7F -> 1
+                b in 0xC0..0xDF -> 2
+                b in 0xE0..0xEF -> 3
+                b in 0xF0..0xF7 -> 4
+                else -> return false // invalid lead byte
+            }
+            if (i + seqLen > bytes.size) return false
+            for (j in 1 until seqLen) {
+                if (bytes[i + j].toInt() and 0xC0 != 0x80) return false
+            }
+            i += seqLen
+        }
+        return true
     }
 
     private fun splitIntoChapters(text: String): List<ParsedChapter> {

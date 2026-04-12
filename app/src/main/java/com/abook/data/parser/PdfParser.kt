@@ -8,6 +8,7 @@ import com.itextpdf.kernel.pdf.canvas.parser.listener.LocationTextExtractionStra
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import java.io.InputStream
 
 /**
@@ -31,11 +32,19 @@ class PdfParser : BookParser {
 
     private fun parseInternal(inputStream: InputStream, fileName: String): ParsedBook {
         val bytes = inputStream.readBytes()
-        val reader = PdfReader(ByteArrayInputStream(bytes))
+        val reader = try {
+            PdfReader(ByteArrayInputStream(bytes))
+        } catch (e: Exception) {
+            throw IOException("Не удалось открыть PDF: ${e.message}")
+        }
         val document = PdfDocument(reader)
 
         return try {
-            val info = document.documentInfo
+            if (document.numberOfPages == 0) {
+                return ParsedBook(title = fileName.substringBeforeLast("."), author = "",
+                    chapters = listOf(ParsedChapter("Документ", "")))
+            }
+            val info = try { document.documentInfo } catch (_: Exception) { null }
             val title = info?.title?.takeIf { it.isNotBlank() }
                 ?: fileName.substringBeforeLast(".")
             val author = info?.author ?: ""
