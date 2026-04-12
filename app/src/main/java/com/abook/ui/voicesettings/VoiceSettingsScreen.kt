@@ -312,7 +312,8 @@ fun VoiceSettingsScreen(
                     value = state.ssmlPauseMs.toFloat(),
                     onValueChange = { viewModel.setSsmlPauseMs(it.toInt()) },
                     valueRange = 0f..5000f,
-                    displayValue = "${state.ssmlPauseMs}мс"
+                    displayValue = "${state.ssmlPauseMs}мс",
+                    onValueChangeFinished = { viewModel.applyLivePlaybackChanges() }
                 )
             }
 
