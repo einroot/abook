@@ -135,8 +135,8 @@ class VoiceSettingsViewModel @Inject constructor(
     }
 
     fun selectEngine(packageName: String) {
-        viewModelScope.launch {
-            service?.reinitializeTts(packageName)
+        service?.reinitializeTts(packageName) {
+            // Called on TTS init callback — engine is now ready
             loadCurrentState()
         }
     }

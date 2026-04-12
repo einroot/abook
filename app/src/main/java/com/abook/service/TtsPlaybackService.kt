@@ -520,7 +520,7 @@ class TtsPlaybackService : Service() {
     fun getTtsEngine(): TtsEngine = ttsEngine
     fun getAudioEffectsManager(): AudioEffectsManager = audioEffects
 
-    fun reinitializeTts(enginePackage: String) {
+    fun reinitializeTts(enginePackage: String, onReady: (() -> Unit)? = null) {
         // Preserve current parameters so they survive engine switch
         val savedRate = ttsEngine.getCurrentSpeechRate()
         val savedPitch = ttsEngine.getCurrentPitch()
@@ -534,7 +534,10 @@ class TtsPlaybackService : Service() {
         ttsEngine = TtsEngine(this)
         ttsEngine.onUtteranceDone = { id -> onUtteranceDone(id) }
         ttsEngine.onRangeStart = { id, s, e -> onRangeStart(id, s, e) }
-        ttsEngine.onUtteranceError = { id -> Log.e(TAG, "Utterance error: $id") }
+        ttsEngine.onUtteranceError = { id ->
+            Log.e(TAG, "Utterance error: $id")
+            onUtteranceDone(id)
+        }
         ttsEngine.initialize(enginePackage) {
             // Restore saved parameters on the fresh engine
             ttsEngine.setSpeechRate(savedRate)
@@ -544,6 +547,7 @@ class TtsPlaybackService : Service() {
             ttsEngine.setSsmlEnabled(savedSsmlEnabled)
             ttsEngine.setSsmlPauseMs(savedSsmlPause)
             audioEffects.initialize(ttsEngine.getAudioSessionId())
+            onReady?.invoke()
         }
     }
 
