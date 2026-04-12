@@ -99,6 +99,7 @@ class TxtParser : BookParser {
                 else -> return false // invalid lead byte
             }
             if (i + seqLen > bytes.size) return false
+            if (i + seqLen > limit) break  // Don't reject at sampling boundary
             for (j in 1 until seqLen) {
                 if (bytes[i + j].toInt() and 0xC0 != 0x80) return false
             }
