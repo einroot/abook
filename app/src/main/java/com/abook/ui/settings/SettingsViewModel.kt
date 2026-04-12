@@ -36,11 +36,23 @@ class SettingsViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppPreferences.DEFAULT_SEEK_LONG)
 
     fun setSeekShortSeconds(seconds: Int) {
-        viewModelScope.launch { prefs.setSeekShortSeconds(seconds) }
+        viewModelScope.launch {
+            prefs.setSeekShortSeconds(seconds)
+            // Ensure long seek is always >= short seek
+            if (seconds > seekLongSeconds.value) {
+                prefs.setSeekLongSeconds(seconds)
+            }
+        }
     }
 
     fun setSeekLongSeconds(seconds: Int) {
-        viewModelScope.launch { prefs.setSeekLongSeconds(seconds) }
+        viewModelScope.launch {
+            prefs.setSeekLongSeconds(seconds)
+            // Ensure short seek is always <= long seek
+            if (seconds < seekShortSeconds.value) {
+                prefs.setSeekShortSeconds(seconds)
+            }
+        }
     }
 
     fun setThemeMode(mode: String) {
