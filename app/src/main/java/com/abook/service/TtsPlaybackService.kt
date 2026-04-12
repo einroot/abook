@@ -278,13 +278,22 @@ class TtsPlaybackService : Service() {
 
     fun prevChapter() {
         if (chapters.isEmpty()) return
-        if (currentChapterIndex > 0) {
-            val wasPlaying = _playbackState.value.isPlaying
+        val wasPlaying = _playbackState.value.isPlaying
+        val currentOffset = _playbackState.value.charOffsetInChapter
+
+        // Music player behavior: if more than 3% into the chapter, first go to
+        // beginning of current chapter. Only on second press go to previous.
+        if (currentOffset > (_playbackState.value.chapterLength * 0.03)) {
+            ttsEngine.stop()
+            updateChapterState()  // resets charOffsetInChapter to 0
+            if (wasPlaying) speakChapter(currentChapterIndex)
+        } else if (currentChapterIndex > 0) {
             ttsEngine.stop()
             currentChapterIndex--
             updateChapterState()
             if (wasPlaying) speakChapter(currentChapterIndex)
         }
+        // If at chapter 0, offset 0 → nothing to do (already at the very start)
     }
 
     fun seekToChapter(index: Int) {

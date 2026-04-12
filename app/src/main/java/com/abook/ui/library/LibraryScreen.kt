@@ -226,11 +226,38 @@ fun LibraryScreen(
                     )
                 }
                 items(books, key = { it.id }) { book ->
+                    var showDeleteConfirm by androidx.compose.runtime.remember {
+                        androidx.compose.runtime.mutableStateOf(false)
+                    }
                     BookCard(
                         book = book,
                         onClick = { onBookClick(book.id) },
-                        onDelete = { viewModel.deleteBook(book.id) }
+                        onDelete = { showDeleteConfirm = true }
                     )
+                    if (showDeleteConfirm) {
+                        androidx.compose.material3.AlertDialog(
+                            onDismissRequest = { showDeleteConfirm = false },
+                            title = { Text("Удалить книгу?") },
+                            text = {
+                                Text("«${book.title}» будет удалена вместе с прогрессом чтения и закладками. Это действие нельзя отменить.")
+                            },
+                            confirmButton = {
+                                androidx.compose.material3.TextButton(
+                                    onClick = {
+                                        viewModel.deleteBook(book.id)
+                                        showDeleteConfirm = false
+                                    }
+                                ) {
+                                    Text("Удалить", color = MaterialTheme.colorScheme.error)
+                                }
+                            },
+                            dismissButton = {
+                                androidx.compose.material3.TextButton(
+                                    onClick = { showDeleteConfirm = false }
+                                ) { Text("Отмена") }
+                            }
+                        )
+                    }
                 }
             }
 

@@ -255,7 +255,7 @@ fun PlayerScreen(
                 modifier = Modifier.fillMaxWidth()
             )
             Text(
-                text = "Глава: ${(playbackState.chapterProgress * 100).toInt()}%",
+                text = "Глава ${playbackState.chapterIndex + 1}/${playbackState.totalChapters}: ${(playbackState.chapterProgress * 100).toInt()}%",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
