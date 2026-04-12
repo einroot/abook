@@ -325,7 +325,6 @@ class VoiceSettingsViewModel @Inject constructor(
 
     fun loadProfile(profile: VoiceProfileEntity) {
         // Apply TTS params directly without triggering individual resyncs.
-        // We'll do ONE resync at the end to avoid rapid stop/start stuttering.
         ttsEngine?.setSpeechRate(profile.speechRate)
         ttsEngine?.setPitch(profile.pitch)
         ttsEngine?.setVolume(profile.volume)
@@ -370,8 +369,15 @@ class VoiceSettingsViewModel @Inject constructor(
             activeProfileId = profile.id
         )
 
-        // Single resync to apply all TTS changes at once
+        // Resync if playing, so changes are heard immediately.
+        // If paused, the new params will take effect on next Play.
         applyLivePlaybackChanges()
+
+        // Auto-preview so user immediately hears the profile difference
+        // even when playback is paused.
+        if (service?.playbackState?.value?.isPlaying != true) {
+            previewVoice()
+        }
     }
 
     fun deleteProfile(profile: VoiceProfileEntity) {

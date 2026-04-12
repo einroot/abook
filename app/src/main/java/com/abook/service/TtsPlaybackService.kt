@@ -37,6 +37,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -133,6 +134,11 @@ class TtsPlaybackService : Service() {
         }
 
         serviceScope.launch {
+            // Wait for TTS engine to be ready before attempting to speak.
+            // Without this, speak() silently drops text and user sees
+            // "playing" state but hears nothing.
+            ttsEngine.initState.first { it }
+
             val book = bookDao.getBook(bookId) ?: return@launch
             chapters = bookDao.getChapters(bookId)
             if (chapters.isEmpty()) return@launch
@@ -260,6 +266,8 @@ class TtsPlaybackService : Service() {
     fun resume() {
         val state = _playbackState.value
         val bookId = state.bookId ?: return
+        if (chapters.isEmpty()) return  // No book loaded
+        if (!ttsEngine.initState.value) return  // TTS not ready yet
         _playbackState.update { it.copy(isPlaying = true) }
         requestAudioFocus()
         statsTracker.startSession(bookId, state.currentBookCharOffset)
