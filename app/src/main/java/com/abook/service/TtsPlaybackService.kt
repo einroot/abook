@@ -267,7 +267,19 @@ class TtsPlaybackService : Service() {
         val state = _playbackState.value
         val bookId = state.bookId ?: return
         if (chapters.isEmpty()) return  // No book loaded
-        if (!ttsEngine.initState.value) return  // TTS not ready yet
+
+        // If TTS not yet initialized, wait for it then resume
+        if (!ttsEngine.initState.value) {
+            serviceScope.launch {
+                ttsEngine.initState.first { it }
+                doResume(bookId, state)
+            }
+            return
+        }
+        doResume(bookId, state)
+    }
+
+    private fun doResume(bookId: String, state: PlaybackState) {
         _playbackState.update { it.copy(isPlaying = true) }
         requestAudioFocus()
         statsTracker.startSession(bookId, state.currentBookCharOffset)
@@ -654,8 +666,16 @@ class TtsPlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Route media button intents through MediaButtonReceiver (only for actual
-        // media button intents, not our own action intents or null restarts)
+        // CRITICAL: When started via startForegroundService() (from MediaButtonReceiver
+        // or SleepTimerAlarmReceiver), we MUST call startForeground() within 5 seconds
+        // or Android kills the process. Do it immediately for ALL intents to be safe.
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (_: Exception) {
+            // May fail if notification channel not ready; non-fatal for non-foreground starts
+        }
+
+        // Route media button intents through MediaButtonReceiver
         if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
             MediaButtonReceiver.handleIntent(mediaSession, intent)
         }
