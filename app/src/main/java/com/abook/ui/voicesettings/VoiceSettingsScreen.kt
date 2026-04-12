@@ -243,7 +243,7 @@ fun VoiceSettingsScreen(
 
                 // Band sliders
                 for (band in 0 until eqInfo.numberOfBands) {
-                    val freq = eqInfo.bandFrequencies[band]
+                    val freq = eqInfo.bandFrequencies.getOrElse(band) { 0 }
                     val level = eqInfo.bandLevels.getOrElse(band) { 0 }
                     val freqLabel = if (freq >= 1000) "${freq / 1000}кГц" else "${freq}Гц"
 

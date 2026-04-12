@@ -111,7 +111,7 @@ class SleepTimerManager(
                 isFadingOut = isFading
             )
 
-            if (isFading) {
+            if (isFading && fadeOutDurationSeconds > 0) {
                 val fadeProgress = remaining.toFloat() / fadeOutDurationSeconds
                 onVolumeChange?.invoke(originalVolume * fadeProgress)
             }
