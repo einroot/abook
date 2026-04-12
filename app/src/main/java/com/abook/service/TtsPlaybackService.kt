@@ -237,6 +237,7 @@ class TtsPlaybackService : Service() {
         if (state.bookId != null) {
             _playbackState.value = state.copy(isPlaying = true)
             requestAudioFocus()
+            statsTracker.startSession(state.bookId!!, state.currentBookCharOffset)
             speakChapter(state.chapterIndex, state.charOffsetInChapter)
             updateNotification()
         }
