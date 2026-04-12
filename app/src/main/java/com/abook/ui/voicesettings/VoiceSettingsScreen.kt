@@ -77,11 +77,12 @@ fun VoiceSettingsScreen(
         ) {
             // --- Profiles section ---
             SectionHeader("Профили голоса")
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            androidx.compose.foundation.lazy.LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                profiles.forEach { profile ->
+                items(profiles.size) { index ->
+                    val profile = profiles[index]
                     Card(
                         modifier = Modifier.clickable { viewModel.loadProfile(profile) },
                         colors = CardDefaults.cardColors(
@@ -113,10 +114,12 @@ fun VoiceSettingsScreen(
                         }
                     }
                 }
-                FilledTonalButton(onClick = { showSaveDialog = true }) {
-                    Icon(Icons.Default.Add, contentDescription = null)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Сохранить")
+                item {
+                    FilledTonalButton(onClick = { showSaveDialog = true }) {
+                        Icon(Icons.Default.Add, contentDescription = null)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Сохранить")
+                    }
                 }
             }
 
@@ -252,7 +255,7 @@ fun VoiceSettingsScreen(
                         value = level.toFloat(),
                         onValueChange = { viewModel.setEqualizerBandLevel(band, it.toInt()) },
                         valueRange = eqInfo.minLevel.toFloat()..eqInfo.maxLevel.toFloat(),
-                        displayValue = "${level / 100}дБ"
+                        displayValue = "${"%.1f".format(level / 100f)}дБ"
                     )
                 }
             } ?: Text(

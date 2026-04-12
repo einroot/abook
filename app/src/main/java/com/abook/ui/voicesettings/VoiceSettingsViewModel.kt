@@ -281,6 +281,13 @@ class VoiceSettingsViewModel @Inject constructor(
     // --- Preview ---
 
     fun previewVoice() {
+        // If book is playing, pause it and tell the service to auto-resume
+        // after the preview utterance completes (id="preview").
+        val wasPlaying = service?.playbackState?.value?.isPlaying == true
+        if (wasPlaying) {
+            service?.pause()
+        }
+        service?.setResumeAfterPreview(wasPlaying)
         ttsEngine?.speak(
             "Это предварительное прослушивание текущих настроек голоса. " +
             "Скорость, тон, громкость и эффекты применены.",

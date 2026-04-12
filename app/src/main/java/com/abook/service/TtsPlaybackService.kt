@@ -435,7 +435,22 @@ class TtsPlaybackService : Service() {
 
     // --- Callbacks ---
 
+    private var resumeAfterPreview = false
+
+    fun setResumeAfterPreview(shouldResume: Boolean) {
+        resumeAfterPreview = shouldResume
+    }
+
     private fun onUtteranceDone(utteranceId: String) {
+        // Handle preview completion — auto-resume book if it was playing
+        if (utteranceId == "preview") {
+            if (resumeAfterPreview) {
+                resumeAfterPreview = false
+                resume()
+            }
+            return
+        }
+
         val parts = utteranceId.split(":")
         if (parts.size < 3) return
 
