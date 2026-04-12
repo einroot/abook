@@ -298,8 +298,12 @@ class TtsPlaybackService : Service() {
         if (chapters.isEmpty()) return
         val state = _playbackState.value
         val newOffset = (state.charOffsetInChapter + offsetDelta).coerceIn(0, state.chapterLength)
+        // Scale processed offset back to original space for book-level progress
+        val originalLen = chapters.getOrNull(currentChapterIndex)?.textContent?.length?.coerceAtLeast(1) ?: 1
+        val processedLen = currentProcessedTextLength.coerceAtLeast(1)
+        val scaledOffset = newOffset.toLong() * originalLen / processedLen
         val globalOffset = chapters.take(currentChapterIndex)
-            .sumOf { it.textContent.length.toLong() } + newOffset
+            .sumOf { it.textContent.length.toLong() } + scaledOffset
 
         _playbackState.value = state.copy(
             charOffsetInChapter = newOffset,
@@ -317,8 +321,11 @@ class TtsPlaybackService : Service() {
         if (chapters.isEmpty()) return
         val state = _playbackState.value
         val clamped = offset.coerceIn(0, state.chapterLength)
+        val originalLen = chapters.getOrNull(currentChapterIndex)?.textContent?.length?.coerceAtLeast(1) ?: 1
+        val processedLen = currentProcessedTextLength.coerceAtLeast(1)
+        val scaledOffset = clamped.toLong() * originalLen / processedLen
         val globalOffset = chapters.take(currentChapterIndex)
-            .sumOf { it.textContent.length.toLong() } + clamped
+            .sumOf { it.textContent.length.toLong() } + scaledOffset
 
         _playbackState.value = state.copy(
             charOffsetInChapter = clamped,
