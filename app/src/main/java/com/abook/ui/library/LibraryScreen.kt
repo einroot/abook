@@ -65,12 +65,24 @@ fun LibraryScreen(
 ) {
     val books by viewModel.books.collectAsState()
     val isImporting by viewModel.isImporting.collectAsState()
+    val importError by viewModel.importError.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val sortMode by viewModel.sortMode.collectAsState()
     var showSortMenu by androidx.compose.runtime.remember {
         androidx.compose.runtime.mutableStateOf(false)
     }
+    val snackbarHostState = androidx.compose.runtime.remember {
+        androidx.compose.material3.SnackbarHostState()
+    }
     val context = LocalContext.current
+
+    // Show import error as Snackbar
+    androidx.compose.runtime.LaunchedEffect(importError) {
+        importError?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearImportError()
+        }
+    }
 
     val fileLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -87,6 +99,7 @@ fun LibraryScreen(
     }
 
     Scaffold(
+        snackbarHost = { androidx.compose.material3.SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text("ABook") },

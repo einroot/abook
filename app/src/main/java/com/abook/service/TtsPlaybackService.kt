@@ -57,6 +57,7 @@ class TtsPlaybackService : Service() {
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
 
+    private var volumeBeforeDuck: Float = 1.0f
     private var currentBookId: String? = null
     private var currentChapterIndex: Int = 0
     private var chapters: List<com.abook.data.db.entity.ChapterEntity> = emptyList()
@@ -545,10 +546,13 @@ class TtsPlaybackService : Service() {
                     AudioManager.AUDIOFOCUS_LOSS -> pause()
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pause()
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                        ttsEngine.setVolume(0.3f)
+                        // Save actual volume before ducking so it can be restored
+                        volumeBeforeDuck = ttsEngine.getCurrentVolume()
+                        ttsEngine.setVolume(volumeBeforeDuck * 0.3f)
                     }
                     AudioManager.AUDIOFOCUS_GAIN -> {
-                        ttsEngine.setVolume(1.0f)
+                        // Restore the user's volume, not always 1.0
+                        ttsEngine.setVolume(volumeBeforeDuck)
                     }
                 }
             }

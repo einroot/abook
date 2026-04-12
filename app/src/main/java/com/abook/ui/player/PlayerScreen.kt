@@ -367,14 +367,10 @@ fun PlayerScreen(
 
             Spacer(modifier = Modifier.height(32.dp))
 
-            // Sleep timer button
+            // Sleep timer button — always opens sheet for configuration
             FilledTonalIconButton(
                 onClick = {
-                    if (sleepTimerState.isActive) {
-                        showSleepTimerSheet = true
-                    } else {
-                        viewModel.startSleepTimer(30)
-                    }
+                    showSleepTimerSheet = true
                 },
                 modifier = Modifier.size(48.dp)
             ) {
