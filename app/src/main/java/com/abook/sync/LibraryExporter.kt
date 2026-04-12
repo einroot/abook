@@ -42,14 +42,20 @@ class LibraryExporter(private val bookDao: BookDao) {
     fun exportToCsv(books: List<com.abook.data.db.entity.BookEntity>): String {
         val sb = StringBuilder("id;title;author;format;chapters;addedAt;lastOpenedAt\n")
         for (b in books) {
-            sb.append("\"${b.id}\";")
-                .append("\"${b.title.replace("\"", "'")}\";")
-                .append("\"${b.author.replace("\"", "'")}\";")
-                .append("${b.format};")
+            sb.append("${csvEscape(b.id)};")
+                .append("${csvEscape(b.title)};")
+                .append("${csvEscape(b.author)};")
+                .append("${csvEscape(b.format)};")
                 .append("${b.totalChapters};")
                 .append("${b.addedAt};")
                 .append("${b.lastOpenedAt ?: ""}\n")
         }
         return sb.toString()
+    }
+
+    /** Escape CSV field: wrap in quotes, double any existing quotes */
+    private fun csvEscape(value: String): String {
+        val escaped = value.replace("\"", "\"\"")
+        return "\"$escaped\""
     }
 }

@@ -24,6 +24,7 @@ import com.abook.ABookApplication
 import com.abook.MainActivity
 import com.abook.R
 import com.abook.data.db.dao.BookDao
+import com.abook.data.db.dao.StatsDao
 import com.abook.data.db.entity.ReadingPositionEntity
 import com.abook.domain.model.PlaybackState
 import com.abook.domain.model.SleepTimerState
@@ -43,6 +44,7 @@ import javax.inject.Inject
 class TtsPlaybackService : Service() {
 
     @Inject lateinit var bookDao: BookDao
+    @Inject lateinit var statsDao: StatsDao
 
     private val binder = LocalBinder()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -50,6 +52,7 @@ class TtsPlaybackService : Service() {
     private lateinit var ttsEngine: TtsEngine
     private lateinit var audioEffects: AudioEffectsManager
     private lateinit var sleepTimerManager: SleepTimerManager
+    private lateinit var statsTracker: StatsTracker
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -83,6 +86,7 @@ class TtsPlaybackService : Service() {
         ttsEngine = TtsEngine(this)
         audioEffects = AudioEffectsManager()
         sleepTimerManager = SleepTimerManager(this, serviceScope)
+        statsTracker = StatsTracker(statsDao, serviceScope)
 
         sleepTimerManager.onVolumeChange = { volume ->
             ttsEngine.setVolume(volume)
@@ -155,6 +159,7 @@ class TtsPlaybackService : Service() {
 
             requestAudioFocus()
             startForeground(NOTIFICATION_ID, buildNotification())
+            statsTracker.startSession(bookId, currentGlobalOffset)
             speakChapter(currentChapterIndex, charOffset)
         }
     }
@@ -223,6 +228,7 @@ class TtsPlaybackService : Service() {
         updateMediaSession()
         updateNotification()
         savePosition()
+        statsTracker.endSession()
         abandonAudioFocus()
     }
 
@@ -436,6 +442,7 @@ class TtsPlaybackService : Service() {
             currentWordStart = globalChapterOffset,
             currentWordEnd = globalChapterEnd
         )
+        statsTracker.updateOffset(globalBookOffset)
     }
 
     // --- TTS settings access ---
