@@ -179,7 +179,9 @@ class PlayerViewModel @Inject constructor(
 
     override fun onCleared() {
         if (isBound) {
-            context.unbindService(connection)
+            try {
+                context.unbindService(connection)
+            } catch (_: Exception) {}
             isBound = false
         }
         super.onCleared()

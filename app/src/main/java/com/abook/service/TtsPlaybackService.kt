@@ -37,6 +37,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -197,9 +198,7 @@ class TtsPlaybackService : Service() {
 
         // Update chapterLength to match processed text so progress bar and
         // seek clamping are consistent with the offsets from onRangeStart.
-        _playbackState.value = _playbackState.value.copy(
-            chapterLength = processedText.length
-        )
+        _playbackState.update { it.copy(chapterLength = processedText.length) }
 
         if (currentChunks.isEmpty()) {
             updateMediaSession()
@@ -247,7 +246,7 @@ class TtsPlaybackService : Service() {
 
     fun pause() {
         ttsEngine.stop()
-        _playbackState.value = _playbackState.value.copy(isPlaying = false)
+        _playbackState.update { it.copy(isPlaying = false) }
         updateMediaSession()
         updateNotification()
         savePosition()
@@ -258,7 +257,7 @@ class TtsPlaybackService : Service() {
     fun resume() {
         val state = _playbackState.value
         if (state.bookId != null) {
-            _playbackState.value = state.copy(isPlaying = true)
+            _playbackState.update { it.copy(isPlaying = true) }
             requestAudioFocus()
             state.bookId?.let { statsTracker.startSession(it, state.currentBookCharOffset) }
             speakChapter(state.chapterIndex, state.charOffsetInChapter)
@@ -309,10 +308,9 @@ class TtsPlaybackService : Service() {
         val globalOffset = chapters.take(currentChapterIndex)
             .sumOf { it.textContent.length.toLong() } + scaledOffset
 
-        _playbackState.value = state.copy(
-            charOffsetInChapter = newOffset,
-            currentBookCharOffset = globalOffset
-        )
+        _playbackState.update {
+            it.copy(charOffsetInChapter = newOffset, currentBookCharOffset = globalOffset)
+        }
 
         if (state.isPlaying) {
             speakChapter(currentChapterIndex, newOffset)
@@ -331,10 +329,9 @@ class TtsPlaybackService : Service() {
         val globalOffset = chapters.take(currentChapterIndex)
             .sumOf { it.textContent.length.toLong() } + scaledOffset
 
-        _playbackState.value = state.copy(
-            charOffsetInChapter = clamped,
-            currentBookCharOffset = globalOffset
-        )
+        _playbackState.update {
+            it.copy(charOffsetInChapter = clamped, currentBookCharOffset = globalOffset)
+        }
 
         if (state.isPlaying) {
             speakChapter(currentChapterIndex, clamped)
@@ -363,10 +360,9 @@ class TtsPlaybackService : Service() {
                 val localOffsetProcessed = (localOffsetOriginal.toLong() * processedLen / originalLen).toInt()
 
                 val globalOffset = chapters.take(i).sumOf { c -> c.textContent.length.toLong() } + localOffsetOriginal
-                _playbackState.value = _playbackState.value.copy(
-                    charOffsetInChapter = localOffsetProcessed,
-                    currentBookCharOffset = globalOffset
-                )
+                _playbackState.update {
+                    it.copy(charOffsetInChapter = localOffsetProcessed, currentBookCharOffset = globalOffset)
+                }
                 if (wasPlaying) speakChapter(i, localOffsetProcessed)
                 return
             }
@@ -412,14 +408,16 @@ class TtsPlaybackService : Service() {
         val processedLen = TextProcessor.DEFAULT.process(chapter.textContent).length
         currentProcessedTextLength = processedLen
 
-        _playbackState.value = _playbackState.value.copy(
-            chapterIndex = currentChapterIndex,
-            chapterTitle = chapter.title,
-            charOffsetInChapter = 0,
-            chapterLength = processedLen,
-            currentBookCharOffset = globalOffset,
-            currentChapterText = chapter.textContent
-        )
+        _playbackState.update {
+            it.copy(
+                chapterIndex = currentChapterIndex,
+                chapterTitle = chapter.title,
+                charOffsetInChapter = 0,
+                chapterLength = processedLen,
+                currentBookCharOffset = globalOffset,
+                currentChapterText = chapter.textContent
+            )
+        }
         updateMediaSession()
         updateNotification()
     }
@@ -480,12 +478,14 @@ class TtsPlaybackService : Service() {
         val globalBookOffset = chapters.take(currentChapterIndex)
             .sumOf { it.textContent.length.toLong() } + scaledChapterOffset
 
-        _playbackState.value = _playbackState.value.copy(
-            charOffsetInChapter = globalChapterOffset,
-            currentBookCharOffset = globalBookOffset,
-            currentWordStart = globalChapterOffset,
-            currentWordEnd = globalChapterEnd
-        )
+        _playbackState.update {
+            it.copy(
+                charOffsetInChapter = globalChapterOffset,
+                currentBookCharOffset = globalBookOffset,
+                currentWordStart = globalChapterOffset,
+                currentWordEnd = globalChapterEnd
+            )
+        }
         statsTracker.updateOffset(globalBookOffset)
     }
 
