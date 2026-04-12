@@ -259,13 +259,12 @@ class TtsPlaybackService : Service() {
 
     fun resume() {
         val state = _playbackState.value
-        if (state.bookId != null) {
-            _playbackState.update { it.copy(isPlaying = true) }
-            requestAudioFocus()
-            state.bookId?.let { statsTracker.startSession(it, state.currentBookCharOffset) }
-            speakChapter(state.chapterIndex, state.charOffsetInChapter)
-            updateNotification()
-        }
+        val bookId = state.bookId ?: return
+        _playbackState.update { it.copy(isPlaying = true) }
+        requestAudioFocus()
+        statsTracker.startSession(bookId, state.currentBookCharOffset)
+        speakChapter(state.chapterIndex, state.charOffsetInChapter)
+        updateNotification()
     }
 
     fun nextChapter() {
