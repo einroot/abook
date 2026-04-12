@@ -1,0 +1,27 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Build outputs
+app/build/
+build/
+
+# Keystore (never commit)
+*.jks
+*.keystore
+keystore.properties
+app/keystore.properties
+
+# Logs
+*.log
+
+# APK binaries (built artifacts, not source)
+*.apk
+*.aab

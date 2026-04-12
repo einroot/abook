@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ABook</string>
+    <string name="notification_channel_playback">Воспроизведение</string>
+    <string name="notification_channel_playback_desc">Управление озвучкой книг</string>
+</resources>
