@@ -32,13 +32,17 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -62,6 +66,7 @@ fun VoicePickerDialog(
     var selectedLanguageFilter by remember(initialLanguageFilter) {
         mutableStateOf(initialLanguageFilter)
     }
+    val pickerSnackbar = remember { SnackbarHostState() }
 
     // All unique display languages
     val languages = remember(voices) {
@@ -89,6 +94,7 @@ fun VoicePickerDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Scaffold(
+            snackbarHost = { SnackbarHost(pickerSnackbar) },
             topBar = {
                 TopAppBar(
                     title = { Text("Выбор голоса") },
@@ -173,6 +179,7 @@ fun VoicePickerDialog(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
 
+                val pickerScope = rememberCoroutineScope()
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     itemsIndexed(filtered, key = { _, v -> v.name }) { _, voice ->
                         VoiceRow(
@@ -180,6 +187,11 @@ fun VoicePickerDialog(
                             isSelected = voice.name == selectedVoiceName,
                             onClick = {
                                 if (voice.isNotInstalled) {
+                                    pickerScope.launch {
+                                        pickerSnackbar.showSnackbar(
+                                            "Голос нужно скачать. Открываю настройки загрузки..."
+                                        )
+                                    }
                                     onDownloadRequest()
                                 } else {
                                     onSelect(voice.name)
