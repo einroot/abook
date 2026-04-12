@@ -137,11 +137,18 @@ class TtsPlaybackService : Service() {
 
             bookDao.updateLastOpened(bookId, System.currentTimeMillis())
 
+            // Use original text lengths for global offset tracking (totalBookChars)
+            // since we only need rough proportions for book-level progress bar.
             val totalChars = chapters.sumOf { it.textContent.length.toLong() }
             val currentGlobalOffset = chapters.take(currentChapterIndex)
                 .sumOf { it.textContent.length.toLong() } + charOffset
 
             val currentChapter = chapters.getOrNull(currentChapterIndex)
+            val processedLen = currentChapter?.let {
+                TextProcessor.DEFAULT.process(it.textContent).length
+            } ?: 0
+            currentProcessedTextLength = processedLen
+
             _playbackState.value = PlaybackState(
                 isPlaying = true,
                 bookId = bookId,
@@ -150,7 +157,7 @@ class TtsPlaybackService : Service() {
                 chapterTitle = currentChapter?.title.orEmpty(),
                 totalChapters = chapters.size,
                 charOffsetInChapter = charOffset,
-                chapterLength = currentChapter?.textContent?.length ?: 0,
+                chapterLength = processedLen,
                 totalBookChars = totalChars,
                 currentBookCharOffset = currentGlobalOffset,
                 currentChapterText = currentChapter?.textContent.orEmpty(),
@@ -164,6 +171,10 @@ class TtsPlaybackService : Service() {
         }
     }
 
+    // Length of the processed text for the current chapter — used to keep
+    // chapterLength in PlaybackState consistent with chunk offsets.
+    private var currentProcessedTextLength: Int = 0
+
     /**
      * Speak the chapter starting EXACTLY at startCharOffset.
      *
@@ -176,7 +187,14 @@ class TtsPlaybackService : Service() {
 
         val chapter = chapters.getOrNull(chapterIndex) ?: return
         val processedText = TextProcessor.DEFAULT.process(chapter.textContent)
+        currentProcessedTextLength = processedText.length
         currentChunks = ttsEngine.chunkText(processedText)
+
+        // Update chapterLength to match processed text so progress bar and
+        // seek clamping are consistent with the offsets from onRangeStart.
+        _playbackState.value = _playbackState.value.copy(
+            chapterLength = processedText.length
+        )
 
         if (currentChunks.isEmpty()) {
             updateMediaSession()
@@ -374,12 +392,15 @@ class TtsPlaybackService : Service() {
     private fun updateChapterState() {
         val chapter = chapters.getOrNull(currentChapterIndex) ?: return
         val globalOffset = chapters.take(currentChapterIndex).sumOf { it.textContent.length.toLong() }
+        // Pre-compute processed length for consistent progress tracking
+        val processedLen = TextProcessor.DEFAULT.process(chapter.textContent).length
+        currentProcessedTextLength = processedLen
 
         _playbackState.value = _playbackState.value.copy(
             chapterIndex = currentChapterIndex,
             chapterTitle = chapter.title,
             charOffsetInChapter = 0,
-            chapterLength = chapter.textContent.length,
+            chapterLength = processedLen,
             currentBookCharOffset = globalOffset,
             currentChapterText = chapter.textContent
         )
