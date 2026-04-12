@@ -6,10 +6,10 @@ package com.abook.service.textprocessing
 object FootnoteHandler {
 
     private val patterns = listOf(
-        Regex("""\[\d+\]"""),
-        Regex("""\[\w{1,3}\]"""),  // [a], [ix]
-        Regex("""\{\d+\}"""),
-        Regex("""\u00B9|\u00B2|\u00B3|[\u2070-\u2079]""")  // superscript numerals
+        Regex("""\[\d{1,4}\]"""),                              // [1], [42], [1234]
+        Regex("""\{\d{1,4}\}"""),                              // {1}, {42}
+        Regex("""\u00B9|\u00B2|\u00B3|[\u2070-\u2079]""")     // superscript numerals
+        // Removed \[\w{1,3}\] — too aggressive, catches [A], [OK], [PR] in normal text
     )
 
     fun removeFootnotes(text: String): String {
