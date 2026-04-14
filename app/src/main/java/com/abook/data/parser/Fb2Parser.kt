@@ -217,47 +217,83 @@ class Fb2Parser : BookParser {
         depth: Int,
         startChapterNum: Int
     ): List<ParsedChapter> {
-        var title = ""
-        val contentBuilder = StringBuilder()
-        val subChapters = mutableListOf<ParsedChapter>()
+        var sectionTitle = ""
+        // Segments split by inline headings (empty nested sections). The first
+        // segment uses the section's own title; later segments come from empty
+        // <section><title>X</title></section> markers acting as sub-headings,
+        // where the content following the empty section belongs to X.
+        var currentHeading = ""
+        val currentContent = StringBuilder()
+        val chapters = mutableListOf<ParsedChapter>()
+        val realSubChapters = mutableListOf<ParsedChapter>()
+
+        fun flushSegment() {
+            val text = currentContent.toString().trim()
+            val titleForSegment = currentHeading.ifBlank { sectionTitle }
+            if (text.isNotBlank() || titleForSegment.isNotBlank()) {
+                val finalTitle = titleForSegment.ifBlank {
+                    "Глава ${startChapterNum + chapters.size}"
+                }
+                // If a segment has only a heading and no body, speak the heading
+                // so TTS doesn't auto-skip it silently.
+                val finalText = if (text.isBlank() && titleForSegment.isNotBlank()) {
+                    titleForSegment
+                } else {
+                    text
+                }
+                chapters.add(ParsedChapter(finalTitle, finalText))
+            }
+            currentHeading = ""
+            currentContent.clear()
+        }
 
         var event = parser.next()
         while (event != XmlPullParser.END_DOCUMENT) {
             if (event == XmlPullParser.START_TAG) {
                 when (parser.name) {
-                    "title" -> title = parseTextContainer(parser, "title")
+                    "title" -> sectionTitle = parseTextContainer(parser, "title")
                     "section" -> {
-                        if (depth < 2) {
-                            // Nested section — treat as separate chapter
-                            val nested = parseSection(
-                                parser, depth + 1,
-                                startChapterNum + subChapters.size + 1
-                            )
-                            subChapters.addAll(nested)
+                        val nested = parseSection(
+                            parser, depth + 1,
+                            startChapterNum + chapters.size + realSubChapters.size + 1
+                        )
+                        // An empty subsection that contains only a title acts as
+                        // an inline heading. Parsed form: single chapter whose
+                        // text equals its title (our empty-chapter fix above).
+                        val isInlineHeading = nested.size == 1 &&
+                            nested[0].textContent.trim() == nested[0].title.trim()
+                        if (isInlineHeading) {
+                            // Flush the current segment, start a new one whose
+                            // heading is the empty-section's title.
+                            flushSegment()
+                            currentHeading = nested[0].title
+                        } else if (depth < 2) {
+                            realSubChapters.addAll(nested)
                         } else {
-                            // Too deep — merge content
-                            val nested = parseSection(parser, depth + 1, 0)
+                            // Too deep — merge into current segment
                             nested.forEach {
-                                contentBuilder.append(it.title).append("\n\n")
-                                contentBuilder.append(it.textContent).append("\n\n")
+                                currentContent.append(it.title).append("\n\n")
+                                if (it.textContent != it.title) {
+                                    currentContent.append(it.textContent).append("\n\n")
+                                }
                             }
                         }
                     }
                     "p", "subtitle", "cite" -> {
                         val text = parseTextContainer(parser, parser.name)
-                        if (text.isNotBlank()) contentBuilder.append(text).append("\n\n")
+                        if (text.isNotBlank()) currentContent.append(text).append("\n\n")
                     }
                     "empty-line" -> {
-                        contentBuilder.append("\n")
+                        currentContent.append("\n")
                         skipToEndTag(parser, "empty-line")
                     }
                     "epigraph" -> {
                         val text = parseTextContainer(parser, "epigraph")
-                        if (text.isNotBlank()) contentBuilder.append("  ").append(text).append("\n\n")
+                        if (text.isNotBlank()) currentContent.append("  ").append(text).append("\n\n")
                     }
                     "poem" -> {
                         val poemText = parsePoem(parser)
-                        if (poemText.isNotBlank()) contentBuilder.append(poemText).append("\n\n")
+                        if (poemText.isNotBlank()) currentContent.append(poemText).append("\n\n")
                     }
                     "image" -> skipToEndTag(parser, "image")
                 }
@@ -267,18 +303,20 @@ class Fb2Parser : BookParser {
             event = parser.next()
         }
 
-        val result = mutableListOf<ParsedChapter>()
-        val finalTitle = title.ifBlank { "Глава $startChapterNum" }
-        val text = contentBuilder.toString().trim()
-        if (text.isNotBlank() || subChapters.isEmpty()) {
-            // If this section has no textual content but a meaningful title
-            // (a part/chapter divider), use the title as content so TTS still
-            // announces it instead of the player auto-skipping an empty chapter.
-            val finalText = if (text.isBlank() && title.isNotBlank()) title else text
-            result.add(ParsedChapter(finalTitle, finalText))
+        // Decide whether to flush the final/only segment.
+        val finalText = currentContent.toString().trim()
+        val hasHeading = currentHeading.isNotBlank()
+        val hasAnySplitChapters = chapters.isNotEmpty()
+        val shouldEmit = when {
+            hasAnySplitChapters -> true  // always flush last segment of a split section
+            finalText.isNotBlank() -> true
+            realSubChapters.isEmpty() -> true  // nothing else — emit at least a title
+            hasHeading -> true
+            else -> false  // wrapper for real sub-chapters with no content of its own
         }
-        result.addAll(subChapters)
-        return result
+        if (shouldEmit) flushSegment()
+
+        return chapters + realSubChapters
     }
 
     private fun parsePoem(parser: XmlPullParser): String {
