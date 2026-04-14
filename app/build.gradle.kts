@@ -42,6 +42,30 @@ android {
     }
 }
 
+// After every APK build, copy the APK to the project root and rename it to
+// "abook-<buildType>.apk" so it's easy to find without digging through
+// build/outputs/apk/<type>/. This matches the historical workflow.
+// Using a plain doLast action (rather than a Copy task) avoids Gradle's
+// input/output tracking conflicts between this output directory and other
+// tasks that write into build/outputs/apk/.
+androidComponents {
+    onVariants { variant ->
+        val capitalized = variant.name.replaceFirstChar { it.uppercase() }
+        tasks.matching { it.name == "assemble${capitalized}" }.configureEach {
+            doLast {
+                val apkDir = layout.buildDirectory
+                    .dir("outputs/apk/${variant.name}").get().asFile
+                val src = apkDir.listFiles { _, n -> n.endsWith(".apk") }?.firstOrNull()
+                if (src != null && src.exists()) {
+                    val dst = File(rootProject.projectDir, "abook-${variant.name}.apk")
+                    src.copyTo(dst, overwrite = true)
+                    logger.lifecycle("Copied APK -> ${dst.absolutePath}")
+                }
+            }
+        }
+    }
+}
+
 dependencies {
     // Compose
     implementation(platform(libs.compose.bom))
