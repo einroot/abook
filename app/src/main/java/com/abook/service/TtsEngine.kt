@@ -2,6 +2,7 @@ package com.abook.service
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
@@ -87,6 +88,18 @@ class TtsEngine(private val context: Context) {
             if (status == TextToSpeech.SUCCESS) {
                 isInitialized = true
                 _initState.value = true
+
+                // CRITICAL: mark TTS audio as a MEDIA stream owned by this app.
+                // Without this, TTS audio plays on the ASSISTANT stream (or an
+                // engine-internal stream) and the system does NOT attribute it
+                // to our app — our MediaSession never becomes the "active
+                // audio producer", so headset buttons get routed elsewhere.
+                tts?.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
 
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String) {
