@@ -19,6 +19,9 @@ interface BookDao {
     @Query("SELECT id FROM books WHERE lastOpenedAt IS NOT NULL ORDER BY lastOpenedAt DESC LIMIT 1")
     fun getLastOpenedBookId(): Flow<String?>
 
+    @Query("SELECT * FROM books WHERE lastOpenedAt IS NOT NULL ORDER BY lastOpenedAt DESC LIMIT 1")
+    suspend fun getLastOpenedBook(): BookEntity?
+
     @Query("SELECT * FROM books WHERE id = :bookId")
     suspend fun getBook(bookId: String): BookEntity?
 

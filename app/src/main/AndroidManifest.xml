@@ -29,14 +29,14 @@
             </intent-filter>
         </activity>
 
+        <!-- MEDIA_BUTTON is handled by MediaButtonReceiver below, which then
+             forwards to this service via MediaButtonReceiver.handleIntent().
+             Having an intent-filter here as well confuses routing on Android
+             12+ — the receiver path is the only supported one. -->
         <service
             android:name=".service.TtsPlaybackService"
             android:exported="false"
-            android:foregroundServiceType="mediaPlayback">
-            <intent-filter>
-                <action android:name="android.intent.action.MEDIA_BUTTON" />
-            </intent-filter>
-        </service>
+            android:foregroundServiceType="mediaPlayback" />
 
         <receiver
             android:name="androidx.media.session.MediaButtonReceiver"

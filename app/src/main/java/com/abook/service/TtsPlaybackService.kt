@@ -728,20 +728,66 @@ class TtsPlaybackService : Service() {
                     MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
             )
             setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() = resume()
-                override fun onPause() = pause()
+                override fun onPlay() {
+                    Log.d(TAG, "MediaSession.onPlay")
+                    // If nothing is loaded yet, try to open the most-recently
+                    // played book so headset Play on a fresh service actually works.
+                    if (currentBookId == null || chapters.isEmpty()) {
+                        resumeLastPlayedBook()
+                    } else {
+                        resume()
+                    }
+                }
+                override fun onPause() {
+                    Log.d(TAG, "MediaSession.onPause")
+                    pause()
+                }
                 override fun onStop() {
+                    Log.d(TAG, "MediaSession.onStop")
                     pause()
                     stopSelf()
                 }
-                override fun onSkipToNext() = nextChapter()
-                override fun onSkipToPrevious() = prevChapter()
+                override fun onSkipToNext() {
+                    Log.d(TAG, "MediaSession.onSkipToNext")
+                    nextChapter()
+                }
+                override fun onSkipToPrevious() {
+                    Log.d(TAG, "MediaSession.onSkipToPrevious")
+                    prevChapter()
+                }
                 override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                    Log.d(TAG, "MediaSession.onMediaButtonEvent: $mediaButtonEvent")
                     // Let the default handler route PLAY_PAUSE to onPlay/onPause
                     return super.onMediaButtonEvent(mediaButtonEvent)
                 }
             })
             isActive = true
+        }
+        // Publish an initial PlaybackState so the system sees this session as
+        // "ready to receive media buttons" even before a book is loaded. Without
+        // this, Bluetooth headsets on some Android versions don't route buttons
+        // to us because the session looks inactive.
+        updateMediaSession()
+    }
+
+    /**
+     * Load the most-recently-played book from DB and resume it. Used when a
+     * headset / Bluetooth Play is pressed on a fresh service instance where
+     * nothing has been loaded yet.
+     */
+    private fun resumeLastPlayedBook() {
+        serviceScope.launch {
+            try {
+                val book = bookDao.getLastOpenedBook() ?: return@launch
+                val pos = bookDao.getPosition(book.id)
+                playBook(
+                    book.id,
+                    pos?.chapterIndex ?: 0,
+                    pos?.charOffsetInChapter ?: 0
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "resumeLastPlayedBook failed", e)
+            }
         }
     }
 
@@ -788,6 +834,11 @@ class TtsPlaybackService : Service() {
             PlaybackStateCompat.STATE_PAUSED
         }
 
+        // Re-assert active state — on some Android builds MediaSession can drop
+        // to inactive after audio focus loss, which would stop headset buttons
+        // from routing to us.
+        if (!mediaSession.isActive) mediaSession.isActive = true
+
         mediaSession.setPlaybackState(
             PlaybackStateCompat.Builder()
                 .setActions(
@@ -796,7 +847,8 @@ class TtsPlaybackService : Service() {
                     PlaybackStateCompat.ACTION_PLAY_PAUSE or
                     PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
                     PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                    PlaybackStateCompat.ACTION_STOP
+                    PlaybackStateCompat.ACTION_STOP or
+                    PlaybackStateCompat.ACTION_SEEK_TO
                 )
                 .setState(pbState, state.charOffsetInChapter.toLong(), 1.0f)
                 .build()
