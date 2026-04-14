@@ -720,8 +720,23 @@ class TtsPlaybackService : Service() {
     // --- MediaSession ---
 
     private fun setupMediaSession() {
-        val mediaButtonReceiver = ComponentName(this, MediaButtonReceiver::class.java)
-        mediaSession = MediaSessionCompat(this, "ABookMediaSession", mediaButtonReceiver, null).apply {
+        // Build an explicit PendingIntent for MediaButtonReceiver. On Android
+        // 12+ the legacy ComponentName form is unreliable — modern routing
+        // requires a PendingIntent. Also required for media buttons to reach
+        // us when the service is already running in the background.
+        val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+            setClass(this@TtsPlaybackService, MediaButtonReceiver::class.java)
+        }
+        val mediaButtonPi = PendingIntent.getBroadcast(
+            this, 0, mediaButtonIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        mediaSession = MediaSessionCompat(this, "ABookMediaSession").apply {
+            // Preferred way to tell the system where to deliver media buttons
+            // when our session is inactive or the service is not running.
+            setMediaButtonReceiver(mediaButtonPi)
+
             @Suppress("DEPRECATION")
             setFlags(
                 MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
@@ -730,8 +745,6 @@ class TtsPlaybackService : Service() {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() {
                     Log.d(TAG, "MediaSession.onPlay")
-                    // If nothing is loaded yet, try to open the most-recently
-                    // played book so headset Play on a fresh service actually works.
                     if (currentBookId == null || chapters.isEmpty()) {
                         resumeLastPlayedBook()
                     } else {
@@ -745,7 +758,8 @@ class TtsPlaybackService : Service() {
                 override fun onStop() {
                     Log.d(TAG, "MediaSession.onStop")
                     pause()
-                    stopSelf()
+                    // Do NOT stopSelf() — keep the session alive so the next
+                    // headset Play press still reaches us.
                 }
                 override fun onSkipToNext() {
                     Log.d(TAG, "MediaSession.onSkipToNext")
@@ -757,16 +771,16 @@ class TtsPlaybackService : Service() {
                 }
                 override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
                     Log.d(TAG, "MediaSession.onMediaButtonEvent: $mediaButtonEvent")
-                    // Let the default handler route PLAY_PAUSE to onPlay/onPause
-                    return super.onMediaButtonEvent(mediaButtonEvent)
+                    // super decodes the KeyEvent and fires onPlay / onPause / etc.
+                    val handled = super.onMediaButtonEvent(mediaButtonEvent)
+                    Log.d(TAG, "  -> handled=$handled")
+                    return handled
                 }
             })
             isActive = true
         }
-        // Publish an initial PlaybackState so the system sees this session as
-        // "ready to receive media buttons" even before a book is loaded. Without
-        // this, Bluetooth headsets on some Android versions don't route buttons
-        // to us because the session looks inactive.
+        // Publish an initial PlaybackState immediately — without it Bluetooth
+        // stacks on some Android versions ignore the session.
         updateMediaSession()
     }
 
@@ -882,15 +896,23 @@ class TtsPlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // Transport-control PendingIntents go through MediaButtonReceiver so
+        // Android ties this notification to our MediaSession. That elevates
+        // our session's priority when the user presses Play on a headset —
+        // without this link, another recently-used media app can intercept.
         val playPauseAction = if (state.isPlaying) {
             NotificationCompat.Action(
                 R.drawable.ic_notif_pause, "Пауза",
-                buildServicePendingIntent(ACTION_PAUSE, 1)
+                MediaButtonReceiver.buildMediaButtonPendingIntent(
+                    this, PlaybackStateCompat.ACTION_PLAY_PAUSE
+                )
             )
         } else {
             NotificationCompat.Action(
                 R.drawable.ic_notif_play, "Воспроизвести",
-                buildServicePendingIntent(ACTION_PLAY, 1)
+                MediaButtonReceiver.buildMediaButtonPendingIntent(
+                    this, PlaybackStateCompat.ACTION_PLAY_PAUSE
+                )
             )
         }
 
@@ -912,28 +934,47 @@ class TtsPlaybackService : Service() {
             .addAction(
                 NotificationCompat.Action(
                     R.drawable.ic_notif_prev, "Назад",
-                    buildServicePendingIntent(ACTION_PREV_CHAPTER, 0)
+                    MediaButtonReceiver.buildMediaButtonPendingIntent(
+                        this, PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+                    )
                 )
             )
             .addAction(playPauseAction)
             .addAction(
                 NotificationCompat.Action(
                     R.drawable.ic_notif_next, "Вперёд",
-                    buildServicePendingIntent(ACTION_NEXT_CHAPTER, 2)
+                    MediaButtonReceiver.buildMediaButtonPendingIntent(
+                        this, PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+                    )
                 )
             )
             .addAction(
                 NotificationCompat.Action(
                     R.drawable.ic_notif_stop, "Стоп",
-                    buildServicePendingIntent(ACTION_STOP, 3)
+                    MediaButtonReceiver.buildMediaButtonPendingIntent(
+                        this, PlaybackStateCompat.ACTION_STOP
+                    )
                 )
             )
             .setStyle(
                 androidx.media.app.NotificationCompat.MediaStyle()
                     .setMediaSession(mediaSession.sessionToken)
                     .setShowActionsInCompactView(0, 1, 2)
+                    // Hook Stop action for MediaStyle's swipe-to-dismiss and
+                    // the compact "X" button. Ties the cancellation to our
+                    // session for Android's media UI.
+                    .setShowCancelButton(true)
+                    .setCancelButtonIntent(
+                        MediaButtonReceiver.buildMediaButtonPendingIntent(
+                            this, PlaybackStateCompat.ACTION_STOP
+                        )
+                    )
             )
-            .setOngoing(state.isPlaying)
+            // Keep the notification ongoing whenever a book is loaded — not
+            // only while playing. If the user swipes it away during pause,
+            // the service leaves foreground, the MediaSession goes inactive
+            // and headset buttons stop routing to us (other apps win).
+            .setOngoing(state.bookId != null)
             .setSilent(true)
             .build()
     }
