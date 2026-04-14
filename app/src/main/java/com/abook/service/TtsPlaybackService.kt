@@ -18,6 +18,7 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.media.session.MediaButtonReceiver
 import android.util.Log
+import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import java.io.File
 import com.abook.ABookApplication
@@ -770,11 +771,51 @@ class TtsPlaybackService : Service() {
                     prevChapter()
                 }
                 override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
-                    Log.d(TAG, "MediaSession.onMediaButtonEvent: $mediaButtonEvent")
-                    // super decodes the KeyEvent and fires onPlay / onPause / etc.
-                    val handled = super.onMediaButtonEvent(mediaButtonEvent)
-                    Log.d(TAG, "  -> handled=$handled")
-                    return handled
+                    // Decode the KeyEvent ourselves first — on some devices
+                    // (seen on a few Samsung and Chinese OEM builds)
+                    // super.onMediaButtonEvent() silently fails to dispatch
+                    // PLAY_PAUSE to onPlay/onPause when the session's
+                    // PlaybackState hasn't fully synced. Handling the event
+                    // manually removes that failure mode entirely.
+                    val keyEvent: KeyEvent? =
+                        mediaButtonEvent?.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                    Log.d(TAG, "onMediaButtonEvent: key=${keyEvent?.keyCode} action=${keyEvent?.action}")
+
+                    if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
+                        val isPlaying = _playbackState.value.isPlaying
+                        when (keyEvent.keyCode) {
+                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                            KeyEvent.KEYCODE_HEADSETHOOK -> {
+                                if (isPlaying) pause()
+                                else if (currentBookId == null || chapters.isEmpty()) resumeLastPlayedBook()
+                                else resume()
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                                if (currentBookId == null || chapters.isEmpty()) resumeLastPlayedBook()
+                                else resume()
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                                pause()
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_STOP -> {
+                                pause()
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                                nextChapter()
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                                prevChapter()
+                                return true
+                            }
+                        }
+                    }
+                    // Fallback: let super try if we didn't match the key.
+                    return super.onMediaButtonEvent(mediaButtonEvent)
                 }
             })
             isActive = true
@@ -815,9 +856,16 @@ class TtsPlaybackService : Service() {
             // May fail if notification channel not ready; non-fatal for non-foreground starts
         }
 
-        // Route media button intents through MediaButtonReceiver
+        Log.d(TAG, "onStartCommand action=${intent?.action} extras=${intent?.extras?.keySet()}")
+
+        // Route media button intents through MediaButtonReceiver. This decodes
+        // the KeyEvent and calls mediaSession.controller.dispatchMediaButtonEvent
+        // which ends up in our MediaSessionCompat.Callback.
         if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
-            MediaButtonReceiver.handleIntent(mediaSession, intent)
+            val keyEvent: KeyEvent? = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+            Log.d(TAG, "MEDIA_BUTTON intent: keyCode=${keyEvent?.keyCode} action=${keyEvent?.action}")
+            val dispatched = MediaButtonReceiver.handleIntent(mediaSession, intent)
+            Log.d(TAG, "MediaButtonReceiver.handleIntent -> $dispatched")
         }
         return handleCommand(intent, startId)
     }

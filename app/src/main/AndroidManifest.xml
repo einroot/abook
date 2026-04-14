@@ -29,14 +29,21 @@
             </intent-filter>
         </activity>
 
-        <!-- MEDIA_BUTTON is handled by MediaButtonReceiver below, which then
-             forwards to this service via MediaButtonReceiver.handleIntent().
-             Having an intent-filter here as well confuses routing on Android
-             12+ — the receiver path is the only supported one. -->
+        <!-- MEDIA_BUTTON intent-filter is REQUIRED here. androidx's
+             MediaButtonReceiver.onReceive() queries PackageManager for a
+             Service with this filter to know where to forward the event
+             (via ContextCompat.startForegroundService). Without it the
+             receiver falls back to MediaBrowserServiceCompat, which on this
+             project routes to AutoMediaBrowserService (Android Auto) — the
+             wrong service, and headset Play does nothing. -->
         <service
             android:name=".service.TtsPlaybackService"
             android:exported="false"
-            android:foregroundServiceType="mediaPlayback" />
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </service>
 
         <receiver
             android:name="androidx.media.session.MediaButtonReceiver"
