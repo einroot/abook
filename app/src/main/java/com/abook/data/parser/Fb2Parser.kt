@@ -187,7 +187,9 @@ class Fb2Parser : BookParser {
                     "title" -> {
                         val t = parseTextContainer(parser, "title")
                         if (t.isNotBlank()) {
-                            chapters.add(ParsedChapter(t, ""))
+                            // Use title as content so TTS announces the section
+                            // title when there's no body text to follow.
+                            chapters.add(ParsedChapter(t, t))
                         }
                     }
                     "p", "subtitle" -> {
@@ -269,7 +271,11 @@ class Fb2Parser : BookParser {
         val finalTitle = title.ifBlank { "Глава $startChapterNum" }
         val text = contentBuilder.toString().trim()
         if (text.isNotBlank() || subChapters.isEmpty()) {
-            result.add(ParsedChapter(finalTitle, text))
+            // If this section has no textual content but a meaningful title
+            // (a part/chapter divider), use the title as content so TTS still
+            // announces it instead of the player auto-skipping an empty chapter.
+            val finalText = if (text.isBlank() && title.isNotBlank()) title else text
+            result.add(ParsedChapter(finalTitle, finalText))
         }
         result.addAll(subChapters)
         return result

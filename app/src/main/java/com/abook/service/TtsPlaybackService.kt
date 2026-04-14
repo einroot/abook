@@ -210,6 +210,20 @@ class TtsPlaybackService : Service() {
         _playbackState.update { it.copy(chapterLength = processedText.length) }
 
         if (currentChunks.isEmpty()) {
+            // Empty chapter (e.g., FB2 section with only <title> and no content,
+            // or a divider chapter). Without this auto-advance, playback would
+            // silently freeze on the empty chapter with no way forward.
+            if (_playbackState.value.isPlaying) {
+                if (chapterIndex < chapters.size - 1) {
+                    currentChapterIndex = chapterIndex + 1
+                    updateChapterState()
+                    speakChapter(currentChapterIndex)
+                    return
+                } else {
+                    pause()
+                    return
+                }
+            }
             updateMediaSession()
             return
         }
