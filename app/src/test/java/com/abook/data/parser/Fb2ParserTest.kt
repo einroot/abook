@@ -102,8 +102,9 @@ class Fb2ParserTest {
 
     @Test
     fun splitsContentByEmptyInlineSectionHeadings() = runBlocking {
-        // Real-world FB2 pattern: author uses empty nested <section><title/></section>
-        // as inline headings, with content following in the parent section.
+        // Valid FB2 pattern: empty nested <section><title/></section> acts as
+        // an inline heading, with content following in the parent section.
+        // The parser must split parent content into segments per heading.
         val fb2 = """<?xml version="1.0" encoding="UTF-8"?>
 <FictionBook>
   <description><title-info><book-title>T</book-title></title-info></description>
@@ -160,8 +161,8 @@ class Fb2ParserTest {
 
     @Test
     fun parsesRealWorldSreBookWithInlineHeadings() = runBlocking {
-        // Real file that triggered "chapters stop playing" bug in the wild.
-        // Uses empty nested <section><title/></section> as inline headings.
+        // Regression test on a real FB2 that uses the inline-heading pattern
+        // heavily (valid FB2). Every chapter must end up with real content.
         val stream = Fb2ParserTest::class.java.classLoader!!
             .getResourceAsStream("sre-real.fb2") ?: return@runBlocking
         val parser = Fb2Parser()

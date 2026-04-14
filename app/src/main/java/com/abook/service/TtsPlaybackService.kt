@@ -32,13 +32,16 @@ import com.abook.service.textprocessing.TextProcessor
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -65,6 +68,14 @@ class TtsPlaybackService : Service() {
     private var chapters: List<com.abook.data.db.entity.ChapterEntity> = emptyList()
     private var currentChunks: List<TtsEngine.TextChunk> = emptyList()
     private var currentChunkIndex: Int = 0
+
+    // Watchdog: timestamp of the last TTS progress event (onStart / onRangeStart /
+    // onDone / onError). Used to detect a frozen state — if playback state claims
+    // isPlaying=true but TTS has made no progress for a long time, we force-advance
+    // to the next chapter. This is a last-resort safety net that ensures playback
+    // CANNOT silently freeze, regardless of parser output or TTS engine quirks.
+    private var lastTtsProgressAt: Long = 0L
+    private var watchdogJob: Job? = null
 
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
@@ -105,19 +116,71 @@ class TtsPlaybackService : Service() {
         }
 
         ttsEngine.onUtteranceDone = { utteranceId ->
+            markTtsProgress()
             onUtteranceDone(utteranceId)
         }
 
+        ttsEngine.onUtteranceStart = {
+            markTtsProgress()
+        }
+
         ttsEngine.onRangeStart = { utteranceId, start, end ->
+            markTtsProgress()
             onRangeStart(utteranceId, start, end)
         }
 
         ttsEngine.onUtteranceError = { utteranceId ->
             Log.e(TAG, "Utterance error: $utteranceId")
+            markTtsProgress()
             // Treat error same as done — advance to next chunk/chapter
             // so playback doesn't silently freeze on TTS failures
             onUtteranceDone(utteranceId)
         }
+    }
+
+    /**
+     * Mark that TTS just made progress (start / range / done / error). The
+     * watchdog uses this to detect a frozen state.
+     */
+    private fun markTtsProgress() {
+        lastTtsProgressAt = System.currentTimeMillis()
+    }
+
+    /**
+     * Start the stall-watchdog. Safe to call multiple times — a running job
+     * is reused. Stops automatically when isPlaying becomes false.
+     */
+    private fun startWatchdog() {
+        if (watchdogJob?.isActive == true) return
+        markTtsProgress()
+        watchdogJob = serviceScope.launch {
+            while (isActive) {
+                delay(WATCHDOG_INTERVAL_MS)
+                val state = _playbackState.value
+                if (!state.isPlaying) continue
+                val sinceProgress = System.currentTimeMillis() - lastTtsProgressAt
+                if (sinceProgress < WATCHDOG_STALL_MS) continue
+
+                Log.w(
+                    TAG,
+                    "Watchdog: no TTS progress for ${sinceProgress}ms on chapter " +
+                        "$currentChapterIndex. Forcing advance."
+                )
+                markTtsProgress() // reset so we don't loop-fire instantly
+                if (currentChapterIndex < chapters.size - 1) {
+                    currentChapterIndex++
+                    updateChapterState()
+                    speakChapter(currentChapterIndex)
+                } else {
+                    pause()
+                }
+            }
+        }
+    }
+
+    private fun stopWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = null
     }
 
     // --- Playback control ---
@@ -252,6 +315,8 @@ class TtsPlaybackService : Service() {
             anyQueued = true
         }
 
+        if (anyQueued) startWatchdog()
+
         // If nothing was queued (offset past end of text), auto-advance to next chapter
         if (!anyQueued && _playbackState.value.isPlaying) {
             if (currentChapterIndex < chapters.size - 1) {
@@ -269,6 +334,7 @@ class TtsPlaybackService : Service() {
 
     fun pause() {
         ttsEngine.stop()
+        stopWatchdog()
         _playbackState.update { it.copy(isPlaying = false) }
         updateMediaSession()
         updateNotification()
@@ -864,5 +930,12 @@ class TtsPlaybackService : Service() {
         const val ACTION_NEXT_CHAPTER = "com.abook.action.NEXT_CHAPTER"
         const val ACTION_PREV_CHAPTER = "com.abook.action.PREV_CHAPTER"
         const val ACTION_START_SLEEP_TIMER = "com.abook.action.START_SLEEP_TIMER"
+
+        // Watchdog: if TTS hasn't produced any progress event for this long while
+        // playback is supposed to be active, force-advance to the next chapter.
+        // This is a last-resort safety net so playback CANNOT silently freeze,
+        // regardless of parser output, TTS engine quirks, or content edge-cases.
+        private const val WATCHDOG_STALL_MS = 20_000L
+        private const val WATCHDOG_INTERVAL_MS = 5_000L
     }
 }
