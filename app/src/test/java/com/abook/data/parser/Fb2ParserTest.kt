@@ -101,10 +101,13 @@ class Fb2ParserTest {
     }
 
     @Test
-    fun splitsContentByEmptyInlineSectionHeadings() = runBlocking {
+    fun inlineHeadingsFromEmptyNestedSectionsStayInsideParentChapter() = runBlocking {
         // Valid FB2 pattern: empty nested <section><title/></section> acts as
         // an inline heading, with content following in the parent section.
-        // The parser must split parent content into segments per heading.
+        // The parser must keep the top-level <section> as a SINGLE chapter
+        // (so the UI chapter list isn't cluttered with tiny heading entries),
+        // but inline each heading into the chapter's content so TTS announces
+        // it in its natural place.
         val fb2 = """<?xml version="1.0" encoding="UTF-8"?>
 <FictionBook>
   <description><title-info><book-title>T</book-title></title-info></description>
@@ -128,60 +131,57 @@ class Fb2ParserTest {
             ByteArrayInputStream(fb2.toByteArray(Charsets.UTF_8)),
             "t.fb2"
         )
-        // Expect 3 chapters: one for parent (intro before first heading, may be empty
-        // in which case it should still emit the title), and one per inline heading.
-        val titles = result.chapters.map { it.title }
-        assertTrue(
-            "expected 'Рождение профессии' in $titles",
-            titles.any { it.contains("Рождение профессии") }
-        )
-        assertTrue(
-            "expected 'Что придумал Google' in $titles",
-            titles.any { it.contains("Что придумал Google") }
-        )
-        // Content belonging to each heading should be under that heading, not parent.
-        val birthChapter = result.chapters.first { it.title.contains("Рождение профессии") }
-        assertTrue(
-            "expected 'birth of profession' under Рождение профессии, got: ${birthChapter.textContent}",
-            birthChapter.textContent.contains("birth of profession")
-        )
-        val googleChapter = result.chapters.first { it.title.contains("Что придумал Google") }
-        assertTrue(
-            "expected 'Google invented' under Что придумал Google, got: ${googleChapter.textContent}",
-            googleChapter.textContent.contains("Google invented")
-        )
-        // Ensure no chapter has empty text — that's what caused playback to freeze
-        result.chapters.forEach {
-            assertFalse(
-                "chapter '${it.title}' has blank text",
-                it.textContent.isBlank()
-            )
-        }
+        // Exactly ONE chapter for the top-level section.
+        assertEquals(1, result.chapters.size)
+        val chapter = result.chapters[0]
+        assertEquals("Глава 0: Кто такой SRE", chapter.title)
+        val body = chapter.textContent
+        // Inline headings and their content all appear in order inside it.
+        assertTrue("heading 'Рождение профессии' should be in body", body.contains("Рождение профессии"))
+        assertTrue("'birth of profession' should be in body", body.contains("birth of profession"))
+        assertTrue("heading 'Что придумал Google' should be in body", body.contains("Что придумал Google"))
+        assertTrue("'Google invented' should be in body", body.contains("Google invented"))
+        // Order is preserved: birth heading appears before its content, before
+        // the next heading, before its content.
+        assertTrue(body.indexOf("Рождение профессии") < body.indexOf("birth of profession"))
+        assertTrue(body.indexOf("birth of profession") < body.indexOf("Что придумал Google"))
+        assertTrue(body.indexOf("Что придумал Google") < body.indexOf("Google invented"))
     }
 
     @Test
     fun parsesRealWorldSreBookWithInlineHeadings() = runBlocking {
         // Regression test on a real FB2 that uses the inline-heading pattern
-        // heavily (valid FB2). Every chapter must end up with real content.
+        // heavily. The TOP-LEVEL chapter list must stay clean (one entry per
+        // top-level <section>), and each chapter must be substantive — not a
+        // tiny title-only stub that plays for 2 seconds and auto-advances.
         val stream = Fb2ParserTest::class.java.classLoader!!
             .getResourceAsStream("sre-real.fb2") ?: return@runBlocking
         val parser = Fb2Parser()
         val result = parser.parse(stream, "sre-real.fb2")
 
-        // Must have the heading the user reported getting stuck on
-        val titles = result.chapters.map { it.title }
+        // Should be roughly the number of real chapters (От автора + Глава 0..12),
+        // NOT 100+ tiny sub-heading entries. Allow some slack.
         assertTrue(
-            "expected 'Рождение профессии' among $titles",
-            titles.any { it.contains("Рождение профессии") }
+            "expected <= 20 chapters in flat list, got ${result.chapters.size}",
+            result.chapters.size <= 20
         )
 
-        // The Рождение-chapter MUST contain body content, not just the title,
-        // otherwise playback would freeze/auto-skip with no substance.
-        val birthCh = result.chapters.first { it.title.contains("Рождение профессии") }
+        // The Глава 0 chapter must contain its inline headings inside the body,
+        // in order, with their content following each.
+        val ch0 = result.chapters.first { it.title.contains("Глава 0") }
         assertTrue(
-            "Рождение chapter too short (${birthCh.textContent.length} chars): " +
-                birthCh.textContent.take(100),
-            birthCh.textContent.length > 200
+            "Глава 0 should contain 'Рождение профессии' heading inside body, got: " +
+                ch0.textContent.take(200),
+            ch0.textContent.contains("Рождение профессии")
+        )
+        assertTrue(
+            "Глава 0 should contain 'Что придумал Google' inside body",
+            ch0.textContent.contains("Что придумал Google")
+        )
+        // And the chapter as a whole should be long (all its content merged).
+        assertTrue(
+            "Глава 0 too short (${ch0.textContent.length} chars)",
+            ch0.textContent.length > 3000
         )
 
         // Every chapter must be non-blank — this is the invariant that prevents
