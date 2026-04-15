@@ -151,10 +151,13 @@ class TtsPlaybackService : Service() {
 
         ttsEngine.onUtteranceError = { utteranceId ->
             Log.e(TAG, "Utterance error: $utteranceId")
+            // Mark progress so the watchdog doesn't fire on a legit stop.
+            // We do NOT route this into onUtteranceDone any more: stop()
+            // fires onError for the interrupted utterance and treating it
+            // as "done" triggered auto-advance right after pause, making
+            // the pause not stick. If TTS actually hangs without any
+            // progress for 20s, the watchdog in startWatchdog() handles it.
             markTtsProgress()
-            // Treat error same as done — advance to next chunk/chapter
-            // so playback doesn't silently freeze on TTS failures
-            onUtteranceDone(utteranceId)
         }
     }
 
@@ -685,30 +688,43 @@ class TtsPlaybackService : Service() {
         val chapterIdx = parts[1].toIntOrNull() ?: return
         val charOffset = parts[2].toIntOrNull() ?: return
 
+        // Guard 1: Do NOT auto-advance if we're paused. pause() calls
+        // ttsEngine.stop(), which delivers onError for the interrupted
+        // utterance — our onUtteranceError hook routes it here. Without
+        // this guard the next chapter starts playing right after pause.
+        if (!_playbackState.value.isPlaying) {
+            savePosition()
+            return
+        }
+
+        // Guard 2: Ignore callbacks from utterances that belong to a
+        // different chapter than we're on now (e.g. after seek, next,
+        // prev, loadProfile resync). currentChunks was rebuilt for the
+        // new chapter, so lastChunk comparisons against a stale charOffset
+        // would be nonsense.
+        if (chapterIdx != currentChapterIndex) {
+            return
+        }
+
         // Determine if this was the last chunk of the chapter.
-        //
-        // After seek, the first chunk's utteranceId contains a trimmed offset
-        // (e.g. 500) which doesn't match the original chunk's charOffset (e.g. 0).
-        // So we can't rely on exact match. Instead, check if charOffset falls
-        // within or past the last chunk's range.
+        // After seek, the first chunk's utteranceId contains a trimmed
+        // offset (e.g. 500) that doesn't match the original chunk's
+        // charOffset (0), so we use >= rather than exact match.
         val lastChunk = currentChunks.lastOrNull()
         val isLastChunk = if (lastChunk != null) {
             charOffset >= lastChunk.charOffset
         } else {
-            true // no chunks → treat as last
+            true
         }
 
-        // Also confirm TTS is no longer speaking (queue empty)
         val queueEmpty = !ttsEngine.isSpeaking()
 
         if (isLastChunk && queueEmpty) {
-            // Move to next chapter
             if (currentChapterIndex < chapters.size - 1) {
                 currentChapterIndex++
                 updateChapterState()
                 speakChapter(currentChapterIndex)
             } else {
-                // Book finished
                 pause()
             }
         }
@@ -764,7 +780,7 @@ class TtsPlaybackService : Service() {
         ttsEngine.onRangeStart = { id, s, e -> onRangeStart(id, s, e) }
         ttsEngine.onUtteranceError = { id ->
             Log.e(TAG, "Utterance error: $id")
-            onUtteranceDone(id)
+            markTtsProgress()
         }
         ttsEngine.initialize(enginePackage) {
             // Restore saved parameters on the fresh engine
