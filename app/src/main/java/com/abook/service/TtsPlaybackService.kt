@@ -97,6 +97,13 @@ class TtsPlaybackService : Service() {
     // and queued fresh utterances — TTS kept talking with isPlaying=false.
     private var currentSpeakJob: Job? = null
 
+    // Tracks the in-flight playBook() / resumeLastPlayedBook() coroutine so
+    // pause() can cancel the "load book + start speaking" pipeline too.
+    // Without this, if the user taps Pause while TTS is still initialising
+    // or while Room is loading chapters, that async body completes AFTER
+    // pause() and force-sets isPlaying=true — defeating the user's pause.
+    private var currentLoadJob: Job? = null
+
     // Cached cover bitmap keyed by its path, so buildNotification() does
     // not do disk I/O (BitmapFactory.decodeFile) on the main thread every
     // time play/pause/seek fires. That added 50–200 ms jank per press on
@@ -332,15 +339,21 @@ class TtsPlaybackService : Service() {
             return
         }
 
-        serviceScope.launch {
+        // Cancel any previous load+play pipeline so we can't stack two of
+        // them up when the user double-taps or when a headset press races
+        // with viewmodel.playBook().
+        currentLoadJob?.cancel()
+        currentLoadJob = serviceScope.launch {
             // Wait for TTS engine to be ready before attempting to speak.
             // Without this, speak() silently drops text and user sees
             // "playing" state but hears nothing.
             ttsEngine.initState.first { it }
+            ensureActive()
 
             val book = bookDao.getBook(bookId) ?: return@launch
             chapters = bookDao.getChapters(bookId)
             if (chapters.isEmpty()) return@launch
+            ensureActive()
 
             currentBookId = bookId
             currentChapterIndex = chapterIndex.coerceIn(0, chapters.size - 1)
@@ -377,6 +390,10 @@ class TtsPlaybackService : Service() {
                 currentChapterText = currentChapter?.textContent.orEmpty(),
                 coverPath = book.coverPath
             )
+
+            // If the user managed to tap Pause between the async launch and
+            // here, bail out cleanly and don't start speaking.
+            ensureActive()
 
             requestAudioFocus()
             startForeground(NOTIFICATION_ID, buildNotification())
@@ -492,9 +509,13 @@ class TtsPlaybackService : Service() {
     }
 
     fun pause() {
-        // Cancel any pending speakChapter coroutine FIRST — otherwise its
-        // post-processing tail might call ttsEngine.speak() right after we
-        // set isPlaying=false, making pause ineffective.
+        // Cancel EVERY async path that might force playback to start:
+        // - currentLoadJob: playBook/resumeLastPlayedBook load+speak pipeline
+        //   (if still waiting for TTS init or Room, we must bail before it
+        //   force-sets isPlaying=true and calls speakChapter).
+        // - currentSpeakJob: in-flight text processing / chunk queuing.
+        currentLoadJob?.cancel()
+        currentLoadJob = null
         currentSpeakJob?.cancel()
         currentSpeakJob = null
         ttsEngine.stop()
@@ -517,10 +538,15 @@ class TtsPlaybackService : Service() {
         val bookId = state.bookId ?: return
         if (chapters.isEmpty()) return  // No book loaded
 
-        // If TTS not yet initialized, wait for it then resume
+        // If TTS not yet initialized, wait for it then resume. Track the
+        // wait coroutine in currentLoadJob so pause() cancels it — otherwise
+        // a user pressing Pause during TTS init would be ignored and
+        // playback would start anyway.
         if (!ttsEngine.initState.value) {
-            serviceScope.launch {
+            currentLoadJob?.cancel()
+            currentLoadJob = serviceScope.launch {
                 ttsEngine.initState.first { it }
+                ensureActive()
                 doResume(bookId, state)
             }
             return
@@ -1014,6 +1040,16 @@ class TtsPlaybackService : Service() {
      * nothing has been loaded yet.
      */
     private fun resumeLastPlayedBook() {
+        // Guard against double-launch when a headset Play is pressed twice
+        // quickly on a fresh service — each press would otherwise start its
+        // own load pipeline in parallel.
+        if (currentLoadJob?.isActive == true) return
+        // This launch just reads the DB; the actual load+play pipeline is
+        // inside playBook(), which assigns its own currentLoadJob. We do NOT
+        // reuse currentLoadJob for this preliminary query, because playBook
+        // would then cancel the outer coroutine mid-call.
+        // serviceScope's default dispatcher is Main; Room's suspend queries
+        // hop to their own pool and come back.
         serviceScope.launch {
             try {
                 val book = bookDao.getLastOpenedBook() ?: return@launch
@@ -1023,6 +1059,8 @@ class TtsPlaybackService : Service() {
                     pos?.chapterIndex ?: 0,
                     pos?.charOffsetInChapter ?: 0
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "resumeLastPlayedBook failed", e)
             }
@@ -1229,6 +1267,8 @@ class TtsPlaybackService : Service() {
         ttsEngine.onRangeStart = null
         currentSpeakJob?.cancel()
         currentSpeakJob = null
+        currentLoadJob?.cancel()
+        currentLoadJob = null
         sleepTimerManager.release()
         audioEffects.release()
         ttsEngine.shutdown()
