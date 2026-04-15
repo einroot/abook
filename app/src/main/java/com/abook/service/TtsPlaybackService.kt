@@ -208,40 +208,42 @@ class TtsPlaybackService : Service() {
      * across the whole playback session (including pauses).
      */
     private fun startSilentAudioAnchor() {
-        if (silentAudioTrack != null) return
-        try {
-            val sampleRate = 44100
-            val bufSize = AudioTrack.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            ).coerceAtLeast(4096)
+        if (silentAudioTrack != null || silentAudioJob?.isActive == true) return
+        // Build + play the AudioTrack off the main thread — AudioTrack.Builder
+        // construction and open can block for ~100-200 ms on some devices,
+        // which manifests as the Play button being "stuck" right after tap.
+        silentAudioJob = serviceScope.launch(Dispatchers.IO) {
+            try {
+                val sampleRate = 44100
+                val bufSize = AudioTrack.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                ).coerceAtLeast(4096)
 
-            val track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .build()
-                )
-                .setBufferSizeInBytes(bufSize)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-            track.setVolume(0f)
-            track.play()
-            silentAudioTrack = track
+                val track = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(bufSize)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+                track.setVolume(0f)
+                track.play()
+                silentAudioTrack = track
+                Log.d(TAG, "Silent audio anchor started")
 
-            // Continuously feed silence so the track stays in PLAYING state.
-            // Buffer of zeros, written in a loop.
-            val silence = ShortArray(bufSize / 2)
-            silentAudioJob = serviceScope.launch(Dispatchers.IO) {
+                val silence = ShortArray(bufSize / 2)
                 while (isActive) {
                     val t = silentAudioTrack ?: break
                     try {
@@ -251,10 +253,9 @@ class TtsPlaybackService : Service() {
                         break
                     }
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "Silent audio anchor failed", e)
             }
-            Log.d(TAG, "Silent audio anchor started")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start silent audio anchor", e)
         }
     }
 

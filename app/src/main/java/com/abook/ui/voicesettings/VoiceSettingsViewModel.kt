@@ -329,10 +329,16 @@ class VoiceSettingsViewModel @Inject constructor(
         ttsEngine?.setPitch(profile.pitch)
         ttsEngine?.setVolume(profile.volume)
         ttsEngine?.setPan(profile.pan)
-        profile.voiceName?.let { ttsEngine?.setVoice(it) }
+        // ORDER MATTERS: setLanguage MUST come before setVoice. Android's
+        // TextToSpeech.setLanguage() resets the current voice to the default
+        // voice for that locale — calling it AFTER setVoice silently throws
+        // the specific voice away, while the UI still displays the stored
+        // name from the profile. Language first (as a locale hint), then the
+        // specific voice which takes priority.
         profile.locale?.let {
             try { ttsEngine?.setLanguage(Locale.forLanguageTag(it)) } catch (_: Exception) {}
         }
+        profile.voiceName?.let { ttsEngine?.setVoice(it) }
         ttsEngine?.setSsmlEnabled(profile.useSsml)
         ttsEngine?.setSsmlPauseMs(profile.ssmlPauseBetweenSentencesMs)
 
