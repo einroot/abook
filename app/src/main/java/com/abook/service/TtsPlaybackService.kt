@@ -90,6 +90,11 @@ class TtsPlaybackService : Service() {
     private var silentAudioTrack: AudioTrack? = null
     private var silentAudioJob: Job? = null
 
+    // Tracks the in-flight speakChapter() coroutine so pause() / stop() can
+    // cancel it. Without cancellation, text processing finished after pause
+    // and queued fresh utterances — TTS kept talking with isPlaying=false.
+    private var currentSpeakJob: Job? = null
+
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
 
@@ -352,6 +357,10 @@ class TtsPlaybackService : Service() {
      * buttons seek precisely instead of snapping to chunk boundaries.
      */
     private fun speakChapter(chapterIndex: Int, startCharOffset: Int = 0) {
+        // Cancel any previous in-flight speakChapter coroutine — if it
+        // hadn't reached the tts.speak() loop yet, it would queue fresh
+        // utterances after we've stopped, defeating pause/seek.
+        currentSpeakJob?.cancel()
         ttsEngine.stop()
 
         val chapter = chapters.getOrNull(chapterIndex) ?: return
@@ -361,13 +370,18 @@ class TtsPlaybackService : Service() {
         // button feel frozen after every resume. Do the heavy work on
         // Dispatchers.Default, then hop back to Main to queue to TTS and
         // update state.
-        serviceScope.launch {
+        currentSpeakJob = serviceScope.launch {
             val processedText: String
             val chunks: List<TtsEngine.TextChunk>
             withContext(Dispatchers.Default) {
                 processedText = TextProcessor.DEFAULT.process(chapter.textContent)
                 chunks = ttsEngine.chunkText(processedText)
             }
+
+            // If we were cancelled / paused while processing the text, bail
+            // out before touching TTS so pause actually sticks.
+            if (!isActive) return@launch
+            if (!_playbackState.value.isPlaying) return@launch
 
             currentProcessedTextLength = processedText.length
             currentChunks = chunks
@@ -435,6 +449,11 @@ class TtsPlaybackService : Service() {
     }
 
     fun pause() {
+        // Cancel any pending speakChapter coroutine FIRST — otherwise its
+        // post-processing tail might call ttsEngine.speak() right after we
+        // set isPlaying=false, making pause ineffective.
+        currentSpeakJob?.cancel()
+        currentSpeakJob = null
         ttsEngine.stop()
         stopWatchdog()
         _playbackState.update { it.copy(isPlaying = false) }
@@ -1158,6 +1177,8 @@ class TtsPlaybackService : Service() {
         ttsEngine.onUtteranceDone = null
         ttsEngine.onUtteranceError = null
         ttsEngine.onRangeStart = null
+        currentSpeakJob?.cancel()
+        currentSpeakJob = null
         sleepTimerManager.release()
         audioEffects.release()
         ttsEngine.shutdown()
