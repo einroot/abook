@@ -341,7 +341,12 @@ class TtsPlaybackService : Service() {
         updateNotification()
         savePosition()
         statsTracker.endSession()
-        abandonAudioFocus()
+        // DO NOT abandon audio focus on pause. Holding focus during pause is
+        // how Spotify/YouTube Music/Pocket Casts keep headset buttons pointed
+        // at themselves. Releasing it here hands priority to the "last active
+        // audio app" heuristic, which is exactly what lets residual/dead
+        // sessions intercept the next headset Play press. Focus is released
+        // only on explicit stop/destroy.
     }
 
     fun resume() {
