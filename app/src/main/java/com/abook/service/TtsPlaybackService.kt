@@ -83,6 +83,10 @@ class TtsPlaybackService : Service() {
     // isPlaying=true but TTS has made no progress for a long time, we force-advance
     // to the next chapter. This is a last-resort safety net that ensures playback
     // CANNOT silently freeze, regardless of parser output or TTS engine quirks.
+    // @Volatile because it's written from TTS callback threads and read from the
+    // watchdog coroutine on Main — without volatile, visibility isn't guaranteed
+    // (Long writes on 32-bit can also be torn).
+    @Volatile
     private var lastTtsProgressAt: Long = 0L
     private var watchdogJob: Job? = null
 
@@ -181,9 +185,16 @@ class TtsPlaybackService : Service() {
             audioEffects.initialize(ttsEngine.getAudioSessionId())
         }
 
+        // TTS callbacks are delivered on an arbitrary TTS-engine thread, not
+        // Main. Our handler logic (speakChapter, pause, state mutations,
+        // mediaSession updates) is only safe on Main — it touches var Int
+        // / var List fields without locks. Hop every callback onto the
+        // service's Main scope before running it. markTtsProgress() is
+        // left inline because lastTtsProgressAt is @Volatile and the
+        // watchdog only needs the timestamp roughly.
         ttsEngine.onUtteranceDone = { utteranceId ->
             markTtsProgress()
-            onUtteranceDone(utteranceId)
+            serviceScope.launch { onUtteranceDone(utteranceId) }
         }
 
         ttsEngine.onUtteranceStart = {
@@ -192,7 +203,7 @@ class TtsPlaybackService : Service() {
 
         ttsEngine.onRangeStart = { utteranceId, start, end ->
             markTtsProgress()
-            onRangeStart(utteranceId, start, end)
+            serviceScope.launch { onRangeStart(utteranceId, start, end) }
         }
 
         ttsEngine.onUtteranceError = { utteranceId ->
@@ -896,8 +907,16 @@ class TtsPlaybackService : Service() {
         ttsEngine.stop()
         ttsEngine.shutdown()
         ttsEngine = TtsEngine(this)
-        ttsEngine.onUtteranceDone = { id -> onUtteranceDone(id) }
-        ttsEngine.onRangeStart = { id, s, e -> onRangeStart(id, s, e) }
+        // Hop callbacks to Main (see onCreate for rationale).
+        ttsEngine.onUtteranceDone = { id ->
+            markTtsProgress()
+            serviceScope.launch { onUtteranceDone(id) }
+        }
+        ttsEngine.onUtteranceStart = { markTtsProgress() }
+        ttsEngine.onRangeStart = { id, s, e ->
+            markTtsProgress()
+            serviceScope.launch { onRangeStart(id, s, e) }
+        }
         ttsEngine.onUtteranceError = { id ->
             Log.e(TAG, "Utterance error: $id")
             markTtsProgress()
@@ -1121,16 +1140,16 @@ class TtsPlaybackService : Service() {
         // quickly on a fresh service — each press would otherwise start its
         // own load pipeline in parallel.
         if (currentLoadJob?.isActive == true) return
-        // This launch just reads the DB; the actual load+play pipeline is
-        // inside playBook(), which assigns its own currentLoadJob. We do NOT
-        // reuse currentLoadJob for this preliminary query, because playBook
-        // would then cancel the outer coroutine mid-call.
-        // serviceScope's default dispatcher is Main; Room's suspend queries
-        // hop to their own pool and come back.
-        serviceScope.launch {
+        // Assign the outer launch to currentLoadJob so pause() can cancel
+        // it mid-DB-read. When we reach playBook(), it will cancel US and
+        // install its own currentLoadJob — we exit normally, its new job
+        // takes over.
+        currentLoadJob = serviceScope.launch {
             try {
                 val book = bookDao.getLastOpenedBook() ?: return@launch
+                ensureActive()
                 val pos = bookDao.getPosition(book.id)
+                ensureActive()
                 playBook(
                     book.id,
                     pos?.chapterIndex ?: 0,
