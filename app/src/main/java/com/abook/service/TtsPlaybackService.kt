@@ -48,6 +48,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -586,6 +588,12 @@ class TtsPlaybackService : Service() {
         // manually plays after a phone call paused us, don't fire another
         // auto-resume when the focus GAIN eventually arrives.
         pausedByTransientFocusLoss = false
+        // Idempotency: if already playing, don't restart the speak job — that
+        // would cause a brief audio glitch (stop → process → speak again).
+        // Happens e.g. when the user taps Play in the UI and the notification
+        // simultaneously, or when a stray MediaSession.onPlay fires after
+        // we're already running.
+        if (_playbackState.value.isPlaying && currentSpeakJob?.isActive == true) return
         // Cheap upfront check: nothing to resume if no book loaded.
         if (_playbackState.value.bookId == null || chapters.isEmpty()) return
 
@@ -950,18 +958,24 @@ class TtsPlaybackService : Service() {
 
     // --- Position persistence ---
 
+    @OptIn(DelicateCoroutinesApi::class)
     private fun savePosition() {
         val state = _playbackState.value
         val bookId = state.bookId ?: return
-        serviceScope.launch(Dispatchers.IO) {
-            bookDao.savePosition(
-                ReadingPositionEntity(
-                    bookId = bookId,
-                    chapterIndex = state.chapterIndex,
-                    charOffsetInChapter = state.charOffsetInChapter,
-                    updatedAt = System.currentTimeMillis()
-                )
-            )
+        val entity = ReadingPositionEntity(
+            bookId = bookId,
+            chapterIndex = state.chapterIndex,
+            charOffsetInChapter = state.charOffsetInChapter,
+            updatedAt = System.currentTimeMillis()
+        )
+        // Use a process-wide scope so the DB write survives serviceScope
+        // cancellation in onDestroy (service death). Otherwise the last
+        // position update could be lost if onDestroy cancels before Room
+        // finishes writing. Still runs on IO dispatcher — non-blocking.
+        GlobalScope.launch(Dispatchers.IO) {
+            try {
+                bookDao.savePosition(entity)
+            } catch (_: Exception) { /* best-effort */ }
         }
     }
 
