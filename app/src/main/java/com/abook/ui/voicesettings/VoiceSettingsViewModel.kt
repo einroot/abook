@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -75,6 +76,13 @@ class VoiceSettingsViewModel @Inject constructor(
     val profiles = voiceProfileDao.getAllProfiles()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    /**
+     * Guard against re-applying the saved profile on every service
+     * re-connect (e.g. rotation). We only want to auto-apply it once per
+     * ViewModel lifetime, at startup.
+     */
+    private var autoAppliedSavedProfile = false
+
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val localBinder = binder as? TtsPlaybackService.LocalBinder ?: return
@@ -82,12 +90,37 @@ class VoiceSettingsViewModel @Inject constructor(
             ttsEngine = service?.getTtsEngine()
             audioEffects = service?.getAudioEffectsManager()
             loadCurrentState()
+            applySavedProfileOnce()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             service = null
             ttsEngine = null
             audioEffects = null
+        }
+    }
+
+    /**
+     * Reads the saved active-profile id from AppPreferences, waits for the
+     * profiles list to be non-empty (DAO flow), then calls loadProfile() so
+     * the user's last-used profile is activated automatically on app start.
+     * Without this, the profile appeared "saved" but never highlighted or
+     * applied after relaunch — user had to tap it again.
+     */
+    private fun applySavedProfileOnce() {
+        if (autoAppliedSavedProfile) return
+        autoAppliedSavedProfile = true
+        viewModelScope.launch {
+            try {
+                val savedId = appPreferences.defaultVoiceProfileId
+                    .stateIn(viewModelScope).value ?: return@launch
+                // Wait until the profile list has been loaded from Room.
+                val list = profiles.first { it.isNotEmpty() }
+                val profile = list.firstOrNull { it.id == savedId } ?: return@launch
+                loadProfile(profile)
+            } catch (_: Exception) {
+                // non-fatal: user can still pick a profile manually
+            }
         }
     }
 
@@ -320,6 +353,8 @@ class VoiceSettingsViewModel @Inject constructor(
             )
             val id = voiceProfileDao.insert(entity)
             _uiState.value = state.copy(activeProfileId = id)
+            // Remember this as the active profile across app restarts.
+            appPreferences.setDefaultVoiceProfileId(id)
         }
     }
 
@@ -383,6 +418,13 @@ class VoiceSettingsViewModel @Inject constructor(
         // even when playback is paused.
         if (service?.playbackState?.value?.isPlaying != true) {
             previewVoice()
+        }
+
+        // Remember this as the active profile across app restarts, so the
+        // next launch auto-applies it. Only skip persisting during the
+        // startup auto-apply itself (where we already loaded from prefs).
+        viewModelScope.launch {
+            try { appPreferences.setDefaultVoiceProfileId(profile.id) } catch (_: Exception) {}
         }
     }
 

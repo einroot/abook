@@ -46,6 +46,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -354,72 +355,83 @@ class TtsPlaybackService : Service() {
         ttsEngine.stop()
 
         val chapter = chapters.getOrNull(chapterIndex) ?: return
-        val processedText = TextProcessor.DEFAULT.process(chapter.textContent)
-        currentProcessedTextLength = processedText.length
-        currentChunks = ttsEngine.chunkText(processedText)
 
-        // Update chapterLength to match processed text so progress bar and
-        // seek clamping are consistent with the offsets from onRangeStart.
-        _playbackState.update { it.copy(chapterLength = processedText.length) }
+        // TextProcessor (regex-heavy) and chunkText can take 100–300ms on a
+        // long chapter. Running them on the main thread makes the Play/Pause
+        // button feel frozen after every resume. Do the heavy work on
+        // Dispatchers.Default, then hop back to Main to queue to TTS and
+        // update state.
+        serviceScope.launch {
+            val processedText: String
+            val chunks: List<TtsEngine.TextChunk>
+            withContext(Dispatchers.Default) {
+                processedText = TextProcessor.DEFAULT.process(chapter.textContent)
+                chunks = ttsEngine.chunkText(processedText)
+            }
 
-        if (currentChunks.isEmpty()) {
-            // Empty chapter (e.g., FB2 section with only <title> and no content,
-            // or a divider chapter). Without this auto-advance, playback would
-            // silently freeze on the empty chapter with no way forward.
-            if (_playbackState.value.isPlaying) {
-                if (chapterIndex < chapters.size - 1) {
-                    currentChapterIndex = chapterIndex + 1
+            currentProcessedTextLength = processedText.length
+            currentChunks = chunks
+            _playbackState.update { it.copy(chapterLength = processedText.length) }
+
+            if (currentChunks.isEmpty()) {
+                // Empty chapter (e.g., FB2 section with only <title> and no content,
+                // or a divider chapter). Without this auto-advance, playback would
+                // silently freeze on the empty chapter with no way forward.
+                if (_playbackState.value.isPlaying) {
+                    if (chapterIndex < chapters.size - 1) {
+                        currentChapterIndex = chapterIndex + 1
+                        updateChapterState()
+                        speakChapter(currentChapterIndex)
+                        return@launch
+                    } else {
+                        pause()
+                        return@launch
+                    }
+                }
+                updateMediaSession()
+                return@launch
+            }
+
+            // Find the chunk containing startCharOffset
+            val containingIdx = currentChunks.indexOfFirst {
+                it.charOffset + it.text.length > startCharOffset
+            }.let { if (it < 0) currentChunks.size - 1 else it }
+
+            currentChunkIndex = containingIdx
+
+            var anyQueued = false
+            for (i in containingIdx until currentChunks.size) {
+                val chunk = currentChunks[i]
+                val (speakText, speakOffset) = if (i == containingIdx) {
+                    // Trim the first chunk so it starts exactly at startCharOffset
+                    val localStart = (startCharOffset - chunk.charOffset).coerceIn(0, chunk.text.length)
+                    val trimmed = chunk.text.substring(localStart)
+                    if (trimmed.isBlank()) continue
+                    trimmed to (chunk.charOffset + localStart)
+                } else {
+                    chunk.text to chunk.charOffset
+                }
+                val utteranceId = "$currentBookId:$chapterIndex:$speakOffset"
+                ttsEngine.speak(speakText, utteranceId)
+                anyQueued = true
+            }
+
+            if (anyQueued) startWatchdog()
+
+            // If nothing was queued (offset past end of text), auto-advance to next chapter
+            if (!anyQueued && _playbackState.value.isPlaying) {
+                if (currentChapterIndex < chapters.size - 1) {
+                    currentChapterIndex++
                     updateChapterState()
                     speakChapter(currentChapterIndex)
-                    return
+                    return@launch
                 } else {
                     pause()
-                    return
                 }
             }
+
             updateMediaSession()
-            return
         }
-
-        // Find the chunk containing startCharOffset
-        val containingIdx = currentChunks.indexOfFirst {
-            it.charOffset + it.text.length > startCharOffset
-        }.let { if (it < 0) currentChunks.size - 1 else it }
-
-        currentChunkIndex = containingIdx
-
-        var anyQueued = false
-        for (i in containingIdx until currentChunks.size) {
-            val chunk = currentChunks[i]
-            val (speakText, speakOffset) = if (i == containingIdx) {
-                // Trim the first chunk so it starts exactly at startCharOffset
-                val localStart = (startCharOffset - chunk.charOffset).coerceIn(0, chunk.text.length)
-                val trimmed = chunk.text.substring(localStart)
-                if (trimmed.isBlank()) continue
-                trimmed to (chunk.charOffset + localStart)
-            } else {
-                chunk.text to chunk.charOffset
-            }
-            val utteranceId = "$currentBookId:$chapterIndex:$speakOffset"
-            ttsEngine.speak(speakText, utteranceId)
-            anyQueued = true
-        }
-
-        if (anyQueued) startWatchdog()
-
-        // If nothing was queued (offset past end of text), auto-advance to next chapter
-        if (!anyQueued && _playbackState.value.isPlaying) {
-            if (currentChapterIndex < chapters.size - 1) {
-                currentChapterIndex++
-                updateChapterState()
-                speakChapter(currentChapterIndex)
-                return
-            } else {
-                pause()
-            }
-        }
-
-        updateMediaSession()
     }
 
     fun pause() {
