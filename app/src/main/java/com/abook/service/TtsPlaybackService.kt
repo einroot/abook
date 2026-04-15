@@ -44,6 +44,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -357,94 +359,94 @@ class TtsPlaybackService : Service() {
      * buttons seek precisely instead of snapping to chunk boundaries.
      */
     private fun speakChapter(chapterIndex: Int, startCharOffset: Int = 0) {
-        // Cancel any previous in-flight speakChapter coroutine — if it
-        // hadn't reached the tts.speak() loop yet, it would queue fresh
-        // utterances after we've stopped, defeating pause/seek.
+        // Cancel previous in-flight speakChapter coroutine so it can't queue
+        // TTS utterances after this new call (or after a pause).
         currentSpeakJob?.cancel()
         ttsEngine.stop()
 
         val chapter = chapters.getOrNull(chapterIndex) ?: return
 
-        // TextProcessor (regex-heavy) and chunkText can take 100–300ms on a
-        // long chapter. Running them on the main thread makes the Play/Pause
-        // button feel frozen after every resume. Do the heavy work on
-        // Dispatchers.Default, then hop back to Main to queue to TTS and
-        // update state.
+        // Heavy text processing + chunking runs off main thread. We rely
+        // ONLY on coroutine cancellation as the correctness signal: if
+        // pause() or a new speakChapter() cancels us, ensureActive() throws
+        // CancellationException and we exit cleanly before queuing TTS.
+        // We do NOT re-check _playbackState.value.isPlaying inside —
+        // checking mutable state from inside a coroutine races with other
+        // callbacks that might flip isPlaying transiently and make Play
+        // look broken.
         currentSpeakJob = serviceScope.launch {
-            val processedText: String
-            val chunks: List<TtsEngine.TextChunk>
-            withContext(Dispatchers.Default) {
-                processedText = TextProcessor.DEFAULT.process(chapter.textContent)
-                chunks = ttsEngine.chunkText(processedText)
-            }
+            try {
+                val processedText: String
+                val chunks: List<TtsEngine.TextChunk>
+                withContext(Dispatchers.Default) {
+                    processedText = TextProcessor.DEFAULT.process(chapter.textContent)
+                    ensureActive()
+                    chunks = ttsEngine.chunkText(processedText)
+                }
+                ensureActive()
 
-            // If we were cancelled / paused while processing the text, bail
-            // out before touching TTS so pause actually sticks.
-            if (!isActive) return@launch
-            if (!_playbackState.value.isPlaying) return@launch
+                currentProcessedTextLength = processedText.length
+                currentChunks = chunks
+                _playbackState.update { it.copy(chapterLength = processedText.length) }
 
-            currentProcessedTextLength = processedText.length
-            currentChunks = chunks
-            _playbackState.update { it.copy(chapterLength = processedText.length) }
-
-            if (currentChunks.isEmpty()) {
-                // Empty chapter (e.g., FB2 section with only <title> and no content,
-                // or a divider chapter). Without this auto-advance, playback would
-                // silently freeze on the empty chapter with no way forward.
-                if (_playbackState.value.isPlaying) {
+                if (chunks.isEmpty()) {
+                    // Empty chapter — auto-advance so playback can't get
+                    // stuck on a section that has only a <title>.
                     if (chapterIndex < chapters.size - 1) {
                         currentChapterIndex = chapterIndex + 1
+                        updateChapterState()
+                        speakChapter(currentChapterIndex)
+                    } else {
+                        pause()
+                    }
+                    return@launch
+                }
+
+                // Find the chunk containing startCharOffset
+                val containingIdx = chunks.indexOfFirst {
+                    it.charOffset + it.text.length > startCharOffset
+                }.let { if (it < 0) chunks.size - 1 else it }
+
+                currentChunkIndex = containingIdx
+
+                var anyQueued = false
+                for (i in containingIdx until chunks.size) {
+                    ensureActive()
+                    val chunk = chunks[i]
+                    val (speakText, speakOffset) = if (i == containingIdx) {
+                        val localStart = (startCharOffset - chunk.charOffset)
+                            .coerceIn(0, chunk.text.length)
+                        val trimmed = chunk.text.substring(localStart)
+                        if (trimmed.isBlank()) continue
+                        trimmed to (chunk.charOffset + localStart)
+                    } else {
+                        chunk.text to chunk.charOffset
+                    }
+                    val utteranceId = "$currentBookId:$chapterIndex:$speakOffset"
+                    ttsEngine.speak(speakText, utteranceId)
+                    anyQueued = true
+                }
+
+                if (anyQueued) startWatchdog()
+
+                if (!anyQueued) {
+                    if (currentChapterIndex < chapters.size - 1) {
+                        currentChapterIndex++
                         updateChapterState()
                         speakChapter(currentChapterIndex)
                         return@launch
                     } else {
                         pause()
-                        return@launch
                     }
                 }
                 updateMediaSession()
-                return@launch
+            } catch (e: CancellationException) {
+                // Expected: pause() or a new speakChapter() cancelled us.
+                // Re-throw so the coroutine machinery completes the cancel.
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "speakChapter failed", e)
             }
-
-            // Find the chunk containing startCharOffset
-            val containingIdx = currentChunks.indexOfFirst {
-                it.charOffset + it.text.length > startCharOffset
-            }.let { if (it < 0) currentChunks.size - 1 else it }
-
-            currentChunkIndex = containingIdx
-
-            var anyQueued = false
-            for (i in containingIdx until currentChunks.size) {
-                val chunk = currentChunks[i]
-                val (speakText, speakOffset) = if (i == containingIdx) {
-                    // Trim the first chunk so it starts exactly at startCharOffset
-                    val localStart = (startCharOffset - chunk.charOffset).coerceIn(0, chunk.text.length)
-                    val trimmed = chunk.text.substring(localStart)
-                    if (trimmed.isBlank()) continue
-                    trimmed to (chunk.charOffset + localStart)
-                } else {
-                    chunk.text to chunk.charOffset
-                }
-                val utteranceId = "$currentBookId:$chapterIndex:$speakOffset"
-                ttsEngine.speak(speakText, utteranceId)
-                anyQueued = true
-            }
-
-            if (anyQueued) startWatchdog()
-
-            // If nothing was queued (offset past end of text), auto-advance to next chapter
-            if (!anyQueued && _playbackState.value.isPlaying) {
-                if (currentChapterIndex < chapters.size - 1) {
-                    currentChapterIndex++
-                    updateChapterState()
-                    speakChapter(currentChapterIndex)
-                    return@launch
-                } else {
-                    pause()
-                }
-            }
-
-            updateMediaSession()
         }
     }
 
