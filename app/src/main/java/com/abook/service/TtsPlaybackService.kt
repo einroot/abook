@@ -3,8 +3,11 @@ package com.abook.service
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
@@ -111,6 +114,25 @@ class TtsPlaybackService : Service() {
     private var cachedCoverPath: String? = null
     private var cachedCoverBitmap: Bitmap? = null
 
+    // Listens for ACTION_AUDIO_BECOMING_NOISY — fired by the system just
+    // before audio is about to switch to the phone speaker (e.g. headphones
+    // unplugged, Bluetooth disconnected). Without this, playback continues
+    // at full volume through the speaker, disturbing people nearby.
+    private val becomingNoisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                Log.d(TAG, "ACTION_AUDIO_BECOMING_NOISY → pause")
+                pause()
+            }
+        }
+    }
+    private var becomingNoisyRegistered = false
+
+    // Set to true when we paused due to a TRANSIENT audio-focus loss so
+    // we can auto-resume when focus comes back. A permanent LOSS clears
+    // it, and manual user pauses never set it.
+    private var pausedByTransientFocusLoss = false
+
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
 
@@ -144,6 +166,16 @@ class TtsPlaybackService : Service() {
         }
 
         setupMediaSession()
+
+        // Register for headphone-unplug / BT-disconnect so we pause instead
+        // of blasting audio through the phone speaker.
+        if (!becomingNoisyRegistered) {
+            registerReceiver(
+                becomingNoisyReceiver,
+                IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+            )
+            becomingNoisyRegistered = true
+        }
 
         ttsEngine.initialize {
             audioEffects.initialize(ttsEngine.getAudioSessionId())
@@ -509,6 +541,11 @@ class TtsPlaybackService : Service() {
     }
 
     fun pause() {
+        // Any pause clears the transient-focus-loss flag. Only the specific
+        // AUDIOFOCUS_LOSS_TRANSIENT branch re-sets it AFTER calling us.
+        // Manual pauses from any other source (UI, headset, timer, noisy)
+        // must NOT be auto-undone by a subsequent AUDIOFOCUS_GAIN.
+        pausedByTransientFocusLoss = false
         // Cancel EVERY async path that might force playback to start:
         // - currentLoadJob: playBook/resumeLastPlayedBook load+speak pipeline
         //   (if still waiting for TTS init or Room, we must bail before it
@@ -534,6 +571,10 @@ class TtsPlaybackService : Service() {
     }
 
     fun resume() {
+        // Any explicit resume clears the transient-focus flag. If the user
+        // manually plays after a phone call paused us, don't fire another
+        // auto-resume when the focus GAIN eventually arrives.
+        pausedByTransientFocusLoss = false
         // Cheap upfront check: nothing to resume if no book loaded.
         if (_playbackState.value.bookId == null || chapters.isEmpty()) return
 
@@ -804,7 +845,17 @@ class TtsPlaybackService : Service() {
     private fun onRangeStart(utteranceId: String, start: Int, end: Int) {
         val parts = utteranceId.split(":")
         if (parts.size < 3) return
+        val chapterIdx = parts[1].toIntOrNull() ?: return
         val chunkCharOffset = parts[2].toIntOrNull() ?: return
+
+        // Guard against late callbacks from stale utterances. If the user
+        // seeked / advanced chapter, old onRangeStart events might still be
+        // in flight on the TTS callback thread. Letting them through would
+        // overwrite the just-seeked charOffset with the old chapter's one.
+        if (chapterIdx != currentChapterIndex) return
+        // Also don't update progress while paused — a late range event
+        // after ttsEngine.stop() would un-pause the visual position.
+        if (!_playbackState.value.isPlaying) return
 
         val globalChapterOffset = chunkCharOffset + start
         val globalChapterEnd = chunkCharOffset + end
@@ -911,14 +962,35 @@ class TtsPlaybackService : Service() {
             )
             .setOnAudioFocusChangeListener { focusChange ->
                 when (focusChange) {
-                    AudioManager.AUDIOFOCUS_LOSS -> pause()
-                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pause()
+                    AudioManager.AUDIOFOCUS_LOSS -> {
+                        // Permanent loss — another app took over. Don't
+                        // auto-resume later.
+                        pausedByTransientFocusLoss = false
+                        pause()
+                    }
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                        // Temporary interruption (phone call, nav beep).
+                        // Remember so GAIN can auto-resume. Must set the
+                        // flag AFTER pause() because pause() clears it —
+                        // otherwise manual pauses during the interruption
+                        // would still auto-resume when focus returns.
+                        val wasPlaying = _playbackState.value.isPlaying
+                        pause()
+                        pausedByTransientFocusLoss = wasPlaying
+                    }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                         volumeBeforeDuck = ttsEngine.getCurrentVolume()
                         ttsEngine.setVolume(volumeBeforeDuck * 0.3f)
                     }
                     AudioManager.AUDIOFOCUS_GAIN -> {
                         ttsEngine.setVolume(volumeBeforeDuck)
+                        // Auto-resume if we were paused by a transient loss
+                        // (call ended, etc). Matches Spotify / YouTube Music
+                        // behaviour. Do nothing if user paused manually.
+                        if (pausedByTransientFocusLoss) {
+                            pausedByTransientFocusLoss = false
+                            resume()
+                        }
                     }
                 }
             }
@@ -1274,6 +1346,10 @@ class TtsPlaybackService : Service() {
         currentSpeakJob = null
         currentLoadJob?.cancel()
         currentLoadJob = null
+        if (becomingNoisyRegistered) {
+            try { unregisterReceiver(becomingNoisyReceiver) } catch (_: Exception) {}
+            becomingNoisyRegistered = false
+        }
         sleepTimerManager.release()
         audioEffects.release()
         ttsEngine.shutdown()
