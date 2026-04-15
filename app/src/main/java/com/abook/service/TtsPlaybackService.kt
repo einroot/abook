@@ -97,6 +97,13 @@ class TtsPlaybackService : Service() {
     // and queued fresh utterances — TTS kept talking with isPlaying=false.
     private var currentSpeakJob: Job? = null
 
+    // Cached cover bitmap keyed by its path, so buildNotification() does
+    // not do disk I/O (BitmapFactory.decodeFile) on the main thread every
+    // time play/pause/seek fires. That added 50–200 ms jank per press on
+    // slow storage. Decoded once when a book is loaded, reused after.
+    private var cachedCoverPath: String? = null
+    private var cachedCoverBitmap: Bitmap? = null
+
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
 
@@ -179,6 +186,7 @@ class TtsPlaybackService : Service() {
         watchdogJob = serviceScope.launch {
             while (isActive) {
                 delay(WATCHDOG_INTERVAL_MS)
+                ensureActive()
                 val state = _playbackState.value
                 if (!state.isPlaying) continue
                 val sinceProgress = System.currentTimeMillis() - lastTtsProgressAt
@@ -190,6 +198,13 @@ class TtsPlaybackService : Service() {
                         "$currentChapterIndex. Forcing advance."
                 )
                 markTtsProgress() // reset so we don't loop-fire instantly
+                // Re-check isPlaying and cancellation right before advancing.
+                // pause() calls stopWatchdog() but our current loop iteration
+                // is past the first isPlaying check; without this second
+                // check we could start the next chapter right after user
+                // paused.
+                ensureActive()
+                if (!_playbackState.value.isPlaying) continue
                 if (currentChapterIndex < chapters.size - 1) {
                     currentChapterIndex++
                     updateChapterState()
@@ -279,6 +294,29 @@ class TtsPlaybackService : Service() {
         } catch (_: Exception) {}
         silentAudioTrack = null
         Log.d(TAG, "Silent audio anchor stopped")
+    }
+
+    /**
+     * Return a cached cover bitmap, or decode on first request and cache it.
+     * Decoding happens synchronously, but only once per book — subsequent
+     * pause/resume/seek/startForeground calls reuse the cached bitmap and
+     * avoid per-action disk I/O on the main thread.
+     */
+    private fun loadCoverBitmapCached(path: String?): Bitmap? {
+        if (path == null) {
+            cachedCoverPath = null
+            cachedCoverBitmap = null
+            return null
+        }
+        if (path == cachedCoverPath && cachedCoverBitmap != null) {
+            return cachedCoverBitmap
+        }
+        val bmp = try {
+            if (File(path).exists()) BitmapFactory.decodeFile(path) else null
+        } catch (_: Exception) { null }
+        cachedCoverPath = path
+        cachedCoverBitmap = bmp
+        return bmp
     }
 
     // --- Playback control ---
@@ -829,7 +867,11 @@ class TtsPlaybackService : Service() {
     // --- Audio focus ---
 
     private fun requestAudioFocus(): Boolean {
-        val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+        // Reuse a single AudioFocusRequest object. Creating a new one on every
+        // resume() leaked AudioFocusChangeListeners — Android keeps old
+        // listeners alive until their request is explicitly abandoned, so
+        // each resume stacked up another pause() call on AUDIOFOCUS_LOSS.
+        val focusRequest = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -841,19 +883,17 @@ class TtsPlaybackService : Service() {
                     AudioManager.AUDIOFOCUS_LOSS -> pause()
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pause()
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                        // Save actual volume before ducking so it can be restored
                         volumeBeforeDuck = ttsEngine.getCurrentVolume()
                         ttsEngine.setVolume(volumeBeforeDuck * 0.3f)
                     }
                     AudioManager.AUDIOFOCUS_GAIN -> {
-                        // Restore the user's volume, not always 1.0
                         ttsEngine.setVolume(volumeBeforeDuck)
                     }
                 }
             }
             .build()
+            .also { audioFocusRequest = it }
 
-        audioFocusRequest = focusRequest
         return audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
     }
 
@@ -1059,11 +1099,7 @@ class TtsPlaybackService : Service() {
                 .build()
         )
 
-        val coverBitmap: Bitmap? = state.coverPath?.let { path ->
-            try {
-                if (File(path).exists()) BitmapFactory.decodeFile(path) else null
-            } catch (_: Exception) { null }
-        }
+        val coverBitmap: Bitmap? = loadCoverBitmapCached(state.coverPath)
 
         mediaSession.setMetadata(
             MediaMetadataCompat.Builder()
@@ -1107,11 +1143,7 @@ class TtsPlaybackService : Service() {
             )
         }
 
-        val coverBitmap: Bitmap? = state.coverPath?.let { path ->
-            try {
-                if (File(path).exists()) BitmapFactory.decodeFile(path) else null
-            } catch (_: Exception) { null }
-        }
+        val coverBitmap: Bitmap? = loadCoverBitmapCached(state.coverPath)
 
         val progressPercent = (state.bookProgress * 100).toInt()
 
