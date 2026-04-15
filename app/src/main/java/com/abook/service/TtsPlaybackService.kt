@@ -9,7 +9,9 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioTrack
 import android.os.Binder
 import android.os.IBinder
 import android.speech.tts.TextToSpeech
@@ -77,6 +79,15 @@ class TtsPlaybackService : Service() {
     // CANNOT silently freeze, regardless of parser output or TTS engine quirks.
     private var lastTtsProgressAt: Long = 0L
     private var watchdogJob: Job? = null
+
+    // Silent AudioTrack played from our process to register as the real
+    // "audio producer" with Android's media routing system. Without it,
+    // Android TTS plays through the com.google.android.tts process and the
+    // audio gets attributed to Google TTS, not to our app — our MediaSession
+    // is shown PLAYING but we lose headset button priority to whatever app
+    // previously held audio focus.
+    private var silentAudioTrack: AudioTrack? = null
+    private var silentAudioJob: Job? = null
 
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
@@ -184,6 +195,80 @@ class TtsPlaybackService : Service() {
         watchdogJob = null
     }
 
+    // --- Silent audio anchor ---
+
+    /**
+     * Start a silent AudioTrack from THIS process. Android's media routing
+     * asks "which app is currently producing audio?" and picks that app's
+     * MediaSession. If only the Google TTS process is producing audio, we
+     * lose — TTS is attributed to com.google.android.tts, not to us.
+     *
+     * A silent track at zero volume is inaudible but counts as our process
+     * playing an AudioTrack, which pins us as the active audio producer
+     * across the whole playback session (including pauses).
+     */
+    private fun startSilentAudioAnchor() {
+        if (silentAudioTrack != null) return
+        try {
+            val sampleRate = 44100
+            val bufSize = AudioTrack.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(4096)
+
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufSize)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            track.setVolume(0f)
+            track.play()
+            silentAudioTrack = track
+
+            // Continuously feed silence so the track stays in PLAYING state.
+            // Buffer of zeros, written in a loop.
+            val silence = ShortArray(bufSize / 2)
+            silentAudioJob = serviceScope.launch(Dispatchers.IO) {
+                while (isActive) {
+                    val t = silentAudioTrack ?: break
+                    try {
+                        val written = t.write(silence, 0, silence.size)
+                        if (written < 0) break
+                    } catch (_: Exception) {
+                        break
+                    }
+                }
+            }
+            Log.d(TAG, "Silent audio anchor started")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start silent audio anchor", e)
+        }
+    }
+
+    private fun stopSilentAudioAnchor() {
+        silentAudioJob?.cancel()
+        silentAudioJob = null
+        try {
+            silentAudioTrack?.stop()
+            silentAudioTrack?.release()
+        } catch (_: Exception) {}
+        silentAudioTrack = null
+        Log.d(TAG, "Silent audio anchor stopped")
+    }
+
     // --- Playback control ---
 
     fun playBook(bookId: String, chapterIndex: Int = 0, charOffset: Int = 0) {
@@ -245,6 +330,9 @@ class TtsPlaybackService : Service() {
 
             requestAudioFocus()
             startForeground(NOTIFICATION_ID, buildNotification())
+            // Anchor ourselves as an audio producer in the system so headset
+            // button routing picks us. Stays on through pause/resume.
+            startSilentAudioAnchor()
             statsTracker.startSession(bookId, currentGlobalOffset)
             speakChapter(currentChapterIndex, charOffset)
         }
@@ -1060,6 +1148,7 @@ class TtsPlaybackService : Service() {
         sleepTimerManager.release()
         audioEffects.release()
         ttsEngine.shutdown()
+        stopSilentAudioAnchor()
         mediaSession.release()
         abandonAudioFocus()
         serviceScope.cancel()
