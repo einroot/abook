@@ -534,9 +534,8 @@ class TtsPlaybackService : Service() {
     }
 
     fun resume() {
-        val state = _playbackState.value
-        val bookId = state.bookId ?: return
-        if (chapters.isEmpty()) return  // No book loaded
+        // Cheap upfront check: nothing to resume if no book loaded.
+        if (_playbackState.value.bookId == null || chapters.isEmpty()) return
 
         // If TTS not yet initialized, wait for it then resume. Track the
         // wait coroutine in currentLoadJob so pause() cancels it — otherwise
@@ -547,14 +546,20 @@ class TtsPlaybackService : Service() {
             currentLoadJob = serviceScope.launch {
                 ttsEngine.initState.first { it }
                 ensureActive()
-                doResume(bookId, state)
+                doResume()
             }
             return
         }
-        doResume(bookId, state)
+        doResume()
     }
 
-    private fun doResume(bookId: String, state: PlaybackState) {
+    private fun doResume() {
+        // Read state fresh at the moment of resume, not captured earlier.
+        // Between the user's tap and this code running, seek/next/prev
+        // could have moved the position — we must resume at the current
+        // chapter and offset, not the one from resume()'s entry point.
+        val state = _playbackState.value
+        val bookId = state.bookId ?: return
         _playbackState.update { it.copy(isPlaying = true) }
         requestAudioFocus()
         statsTracker.startSession(bookId, state.currentBookCharOffset)
