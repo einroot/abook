@@ -92,9 +92,7 @@ class SleepTimerManager(
         // Backup alarm for persistence across process kill
         SleepTimerAlarmReceiver.scheduleAlarm(
             context,
-            System.currentTimeMillis() + durationMinutes * 60_000L,
-            durationMinutes,
-            true
+            System.currentTimeMillis() + durationMinutes * 60_000L
         )
     }
 
@@ -125,12 +123,7 @@ class SleepTimerManager(
             }
         }
 
-        _state.value = SleepTimerState()
-        if (dndEnabled) enableDnd()
-        context.sleepTimerStore.edit { prefs ->
-            prefs[KEY_IS_ACTIVE] = false
-        }
-        onTimerExpired?.invoke()
+        completeTimer()
     }
 
     fun startChapterTimer(chapters: Int) {
@@ -159,9 +152,10 @@ class SleepTimerManager(
         val fadeDur = prefs[KEY_FADE_DURATION] ?: 120
         val remaining = ((endEpoch - System.currentTimeMillis()) / 1000).toInt()
         if (remaining <= 0) {
-            context.sleepTimerStore.edit { it[KEY_IS_ACTIVE] = false }
+            completeTimer()
             return
         }
+        timerJob?.cancel()
         fadeOutDurationSeconds = fadeDur
         _state.value = SleepTimerState(
             isActive = true,
@@ -170,6 +164,38 @@ class SleepTimerManager(
         )
         timerJob = scope.launch { runTimer(remaining) }
         registerShakeDetector()
+        SleepTimerAlarmReceiver.scheduleAlarm(context, endEpoch)
+    }
+
+    fun expireNow() {
+        timerJob?.cancel()
+        fadeJob?.cancel()
+        timerJob = null
+        fadeJob = null
+        unregisterShakeDetector()
+
+        _state.value = SleepTimerState()
+        if (dndEnabled) enableDnd()
+        SleepTimerAlarmReceiver.cancelAlarm(context)
+        scope.launch {
+            context.sleepTimerStore.edit { it[KEY_IS_ACTIVE] = false }
+        }
+        onTimerExpired?.invoke()
+    }
+
+    private suspend fun completeTimer() {
+        timerJob = null
+        fadeJob?.cancel()
+        fadeJob = null
+        unregisterShakeDetector()
+
+        _state.value = SleepTimerState()
+        if (dndEnabled) enableDnd()
+        SleepTimerAlarmReceiver.cancelAlarm(context)
+        context.sleepTimerStore.edit { prefs ->
+            prefs[KEY_IS_ACTIVE] = false
+        }
+        onTimerExpired?.invoke()
     }
 
     private fun vibrate() {
@@ -226,6 +252,10 @@ class SleepTimerManager(
 
         timerJob?.cancel()
         timerJob = scope.launch { runTimer(newRemaining) }
+        SleepTimerAlarmReceiver.scheduleAlarm(
+            context,
+            System.currentTimeMillis() + newRemaining * 1000L
+        )
     }
 
     fun cancel() {

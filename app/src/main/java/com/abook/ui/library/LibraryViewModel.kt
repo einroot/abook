@@ -209,7 +209,7 @@ class LibraryViewModel @Inject constructor(
 
     fun deleteBook(bookId: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            bookDao.deleteBook(bookId)
+            bookDao.deleteBookWithData(bookId)
         }
     }
 }

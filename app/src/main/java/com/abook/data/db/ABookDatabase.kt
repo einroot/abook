@@ -26,7 +26,7 @@ import com.abook.data.db.entity.VoiceProfileEntity
         ListeningSessionEntity::class
     ],
     version = 4,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class ABookDatabase : RoomDatabase() {
     abstract fun bookDao(): BookDao

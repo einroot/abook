@@ -4,7 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
-import androidx.room.Update
+import androidx.room.Transaction
 import com.abook.data.db.entity.BookEntity
 import com.abook.data.db.entity.ChapterEntity
 import com.abook.data.db.entity.ReadingPositionEntity
@@ -30,6 +30,19 @@ interface BookDao {
 
     @Query("DELETE FROM books WHERE id = :bookId")
     suspend fun deleteBook(bookId: String)
+
+    @Query("DELETE FROM reading_positions WHERE bookId = :bookId")
+    suspend fun deleteReadingPosition(bookId: String)
+
+    @Query("DELETE FROM listening_sessions WHERE bookId = :bookId")
+    suspend fun deleteListeningSessions(bookId: String)
+
+    @Transaction
+    suspend fun deleteBookWithData(bookId: String) {
+        deleteReadingPosition(bookId)
+        deleteListeningSessions(bookId)
+        deleteBook(bookId)
+    }
 
     @Query("UPDATE books SET lastOpenedAt = :time WHERE id = :bookId")
     suspend fun updateLastOpened(bookId: String, time: Long)

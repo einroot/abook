@@ -42,6 +42,11 @@ android {
     }
 }
 
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+    arg("room.incremental", "true")
+}
+
 // After every APK build, copy the APK to the project root and rename it to
 // "abook-<buildType>.apk" so it's easy to find without digging through
 // build/outputs/apk/<type>/. This matches the historical workflow.

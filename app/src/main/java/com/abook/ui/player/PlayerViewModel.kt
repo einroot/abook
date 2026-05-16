@@ -36,9 +36,14 @@ class PlayerViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppPreferences.DEFAULT_SEEK_SHORT)
     val seekLongSeconds: StateFlow<Int> = appPreferences.seekLongSeconds
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppPreferences.DEFAULT_SEEK_LONG)
+    val keepScreenOn: StateFlow<Boolean> = appPreferences.keepScreenOn
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val autoPlayOnOpen: StateFlow<Boolean> = appPreferences.autoPlayOnOpen
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     private var service: TtsPlaybackService? = null
     private var isBound = false
+    private var pendingPlayRequest: PendingPlayRequest? = null
 
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
@@ -54,6 +59,10 @@ class PlayerViewModel @Inject constructor(
             val localBinder = binder as? TtsPlaybackService.LocalBinder ?: return
             service = localBinder.getService()
             isBound = true
+            pendingPlayRequest?.let { request ->
+                pendingPlayRequest = null
+                playBook(request.bookId, request.autoPlay)
+            }
 
             viewModelScope.launch {
                 service?.playbackState?.collect { state ->
@@ -96,16 +105,31 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
-    fun playBook(bookId: String) {
+    fun playBook(bookId: String, autoPlay: Boolean) {
+        if (!isBound || service == null) {
+            pendingPlayRequest = PendingPlayRequest(bookId, autoPlay)
+            return
+        }
         viewModelScope.launch {
             val position = bookDao.getPosition(bookId)
-            service?.playBook(
+            val playbackService = service
+            if (playbackService == null) {
+                pendingPlayRequest = PendingPlayRequest(bookId, autoPlay)
+                return@launch
+            }
+            playbackService.playBook(
                 bookId = bookId,
                 chapterIndex = position?.chapterIndex ?: 0,
-                charOffset = position?.charOffsetInChapter ?: 0
+                charOffset = position?.charOffsetInChapter ?: 0,
+                autoPlay = autoPlay
             )
         }
     }
+
+    private data class PendingPlayRequest(
+        val bookId: String,
+        val autoPlay: Boolean
+    )
 
     fun togglePlayPause() {
         val state = _playbackState.value

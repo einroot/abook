@@ -10,13 +10,8 @@ import android.os.Build
 class SleepTimerAlarmReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        val durationMinutes = intent.getIntExtra(EXTRA_DURATION_MINUTES, 30)
-        val fadeOutEnabled = intent.getBooleanExtra(EXTRA_FADE_OUT, true)
-
         val serviceIntent = Intent(context, TtsPlaybackService::class.java).apply {
-            action = TtsPlaybackService.ACTION_START_SLEEP_TIMER
-            putExtra(EXTRA_DURATION_MINUTES, durationMinutes)
-            putExtra(EXTRA_FADE_OUT, fadeOutEnabled)
+            action = TtsPlaybackService.ACTION_EXPIRE_SLEEP_TIMER
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(serviceIntent)
@@ -32,14 +27,9 @@ class SleepTimerAlarmReceiver : BroadcastReceiver() {
 
         fun scheduleAlarm(
             context: Context,
-            triggerAtMillis: Long,
-            durationMinutes: Int,
-            fadeOut: Boolean
+            triggerAtMillis: Long
         ) {
-            val intent = Intent(context, SleepTimerAlarmReceiver::class.java).apply {
-                putExtra(EXTRA_DURATION_MINUTES, durationMinutes)
-                putExtra(EXTRA_FADE_OUT, fadeOut)
-            }
+            val intent = Intent(context, SleepTimerAlarmReceiver::class.java)
             val pi = PendingIntent.getBroadcast(
                 context, REQUEST_CODE, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE

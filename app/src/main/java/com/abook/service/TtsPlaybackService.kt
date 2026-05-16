@@ -218,6 +218,10 @@ class TtsPlaybackService : Service() {
             // progress for 20s, the watchdog in startWatchdog() handles it.
             markTtsProgress()
         }
+
+        serviceScope.launch {
+            sleepTimerManager.restoreTimerState()
+        }
     }
 
     /**
@@ -373,7 +377,12 @@ class TtsPlaybackService : Service() {
 
     // --- Playback control ---
 
-    fun playBook(bookId: String, chapterIndex: Int = 0, charOffset: Int = 0) {
+    fun playBook(
+        bookId: String,
+        chapterIndex: Int = 0,
+        charOffset: Int = 0,
+        autoPlay: Boolean = true
+    ) {
         // Idempotency: if already showing this book, don't restart playback.
         // The UI re-triggers playBook on navigation re-entry, which would
         // otherwise interrupt ongoing speech.
@@ -389,11 +398,13 @@ class TtsPlaybackService : Service() {
         // with viewmodel.playBook().
         currentLoadJob?.cancel()
         currentLoadJob = serviceScope.launch {
-            // Wait for TTS engine to be ready before attempting to speak.
-            // Without this, speak() silently drops text and user sees
-            // "playing" state but hears nothing.
-            ttsEngine.initState.first { it }
-            ensureActive()
+            if (autoPlay) {
+                // Wait for TTS engine to be ready before attempting to speak.
+                // Without this, speak() silently drops text and user sees
+                // "playing" state but hears nothing.
+                ttsEngine.initState.first { it }
+                ensureActive()
+            }
 
             val book = bookDao.getBook(bookId) ?: return@launch
             chapters = bookDao.getChapters(bookId)
@@ -422,7 +433,7 @@ class TtsPlaybackService : Service() {
                 .sumOf { it.textContent.length.toLong() } + scaledCharOffset
 
             _playbackState.value = PlaybackState(
-                isPlaying = true,
+                isPlaying = autoPlay,
                 bookId = bookId,
                 bookTitle = book.title,
                 chapterIndex = currentChapterIndex,
@@ -440,13 +451,21 @@ class TtsPlaybackService : Service() {
             // here, bail out cleanly and don't start speaking.
             ensureActive()
 
-            requestAudioFocus()
-            startForeground(NOTIFICATION_ID, buildNotification())
-            // Anchor ourselves as an audio producer in the system so headset
-            // button routing picks us. Stays on through pause/resume.
-            startSilentAudioAnchor()
-            statsTracker.startSession(bookId, currentGlobalOffset)
-            speakChapter(currentChapterIndex, charOffset)
+            if (autoPlay) {
+                requestAudioFocus()
+                startForeground(NOTIFICATION_ID, buildNotification())
+                // Anchor ourselves as an audio producer in the system so headset
+                // button routing picks us. Stays on through pause/resume.
+                startSilentAudioAnchor()
+                statsTracker.startSession(bookId, currentGlobalOffset)
+                speakChapter(currentChapterIndex, charOffset)
+            } else {
+                ttsEngine.stop()
+                stopWatchdog()
+                updateMediaSession()
+                updateNotification()
+                savePosition()
+            }
         }
     }
 
@@ -1071,6 +1090,10 @@ class TtsPlaybackService : Service() {
                         resume()
                     }
                 }
+                override fun onPlayFromSearch(query: String?, extras: android.os.Bundle?) {
+                    Log.d(TAG, "MediaSession.onPlayFromSearch query=$query")
+                    playFromSearch(query)
+                }
                 override fun onPause() {
                     Log.d(TAG, "MediaSession.onPause")
                     pause()
@@ -1177,6 +1200,34 @@ class TtsPlaybackService : Service() {
         }
     }
 
+    private fun playFromSearch(query: String?) {
+        currentLoadJob?.cancel()
+        currentLoadJob = serviceScope.launch {
+            try {
+                val books = bookDao.getAllBooks().first()
+                val normalized = query.orEmpty().trim()
+                val book = if (normalized.isBlank()) {
+                    books.firstOrNull()
+                } else {
+                    books.firstOrNull {
+                        it.title.contains(normalized, ignoreCase = true) ||
+                            it.author.contains(normalized, ignoreCase = true)
+                    } ?: books.firstOrNull()
+                } ?: return@launch
+                val pos = bookDao.getPosition(book.id)
+                playBook(
+                    book.id,
+                    pos?.chapterIndex ?: 0,
+                    pos?.charOffsetInChapter ?: 0
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "playFromSearch failed", e)
+            }
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // CRITICAL: When started via startForegroundService() (from MediaButtonReceiver
         // or SleepTimerAlarmReceiver), we MUST call startForeground() within 5 seconds
@@ -1211,9 +1262,39 @@ class TtsPlaybackService : Service() {
             }
             ACTION_NEXT_CHAPTER -> nextChapter()
             ACTION_PREV_CHAPTER -> prevChapter()
+            ACTION_PLAY_BOOK -> {
+                val bookId = intent.getStringExtra(EXTRA_BOOK_ID)
+                if (bookId != null) {
+                    val requestedChapter = intent.getIntExtra(EXTRA_CHAPTER_INDEX, -1)
+                    val requestedOffset = intent.getIntExtra(EXTRA_CHAR_OFFSET, -1)
+                    serviceScope.launch {
+                        val savedPosition = if (requestedChapter < 0 || requestedOffset < 0) {
+                            bookDao.getPosition(bookId)
+                        } else {
+                            null
+                        }
+                        playBook(
+                            bookId = bookId,
+                            chapterIndex = requestedChapter.takeIf { it >= 0 }
+                                ?: savedPosition?.chapterIndex
+                                ?: 0,
+                            charOffset = requestedOffset.takeIf { it >= 0 }
+                                ?: savedPosition?.charOffsetInChapter
+                                ?: 0,
+                            autoPlay = true
+                        )
+                    }
+                }
+            }
             ACTION_START_SLEEP_TIMER -> {
                 val duration = intent.getIntExtra(SleepTimerAlarmReceiver.EXTRA_DURATION_MINUTES, 30)
                 startSleepTimer(duration)
+            }
+            ACTION_EXPIRE_SLEEP_TIMER -> sleepTimerManager.expireNow()
+            ACTION_RESTORE_SLEEP_TIMER -> {
+                serviceScope.launch {
+                    sleepTimerManager.restoreTimerState()
+                }
             }
         }
         return START_STICKY
@@ -1402,7 +1483,13 @@ class TtsPlaybackService : Service() {
         const val ACTION_STOP = "com.abook.action.STOP"
         const val ACTION_NEXT_CHAPTER = "com.abook.action.NEXT_CHAPTER"
         const val ACTION_PREV_CHAPTER = "com.abook.action.PREV_CHAPTER"
+        const val ACTION_PLAY_BOOK = "com.abook.action.PLAY_BOOK"
         const val ACTION_START_SLEEP_TIMER = "com.abook.action.START_SLEEP_TIMER"
+        const val ACTION_EXPIRE_SLEEP_TIMER = "com.abook.action.EXPIRE_SLEEP_TIMER"
+        const val ACTION_RESTORE_SLEEP_TIMER = "com.abook.action.RESTORE_SLEEP_TIMER"
+        const val EXTRA_BOOK_ID = "extra_book_id"
+        const val EXTRA_CHAPTER_INDEX = "extra_chapter_index"
+        const val EXTRA_CHAR_OFFSET = "extra_char_offset"
 
         // Watchdog: if TTS hasn't produced any progress event for this long while
         // playback is supposed to be active, force-advance to the next chapter.

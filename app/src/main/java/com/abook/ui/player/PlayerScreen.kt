@@ -51,6 +51,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -60,6 +61,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -122,20 +124,29 @@ fun PlayerScreen(
     val sleepTimerState by viewModel.sleepTimerState.collectAsState()
     val seekShortSec by viewModel.seekShortSeconds.collectAsState()
     val seekLongSec by viewModel.seekLongSeconds.collectAsState()
+    val autoPlayOnOpen by viewModel.autoPlayOnOpen.collectAsState()
+    val keepScreenOn by viewModel.keepScreenOn.collectAsState()
     val speechRate by viewModel.speechRate.collectAsState()
     var showSleepTimerSheet by remember { mutableStateOf(false) }
     var showAddBookmarkDialog by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val localView = LocalView.current
 
-    LaunchedEffect(bookId) {
+    DisposableEffect(localView, keepScreenOn, playbackState.isPlaying) {
+        val previous = localView.keepScreenOn
+        localView.keepScreenOn = keepScreenOn && playbackState.isPlaying
+        onDispose { localView.keepScreenOn = previous }
+    }
+
+    LaunchedEffect(bookId, autoPlayOnOpen) {
         if (bookId != null) {
             // Wait for service binding to deliver current playback state
             kotlinx.coroutines.delay(200)
             // Re-read state from ViewModel (not stale closure) to check accurately
             val currentBookId = viewModel.playbackState.value.bookId
             if (currentBookId != bookId) {
-                viewModel.playBook(bookId)
+                viewModel.playBook(bookId, autoPlayOnOpen)
             }
         }
     }

@@ -3,6 +3,7 @@ package com.abook.di
 import android.content.Context
 import androidx.room.Room
 import com.abook.data.db.ABookDatabase
+import com.abook.data.db.ABookMigrations
 import com.abook.data.db.dao.BookDao
 import com.abook.data.db.dao.BookmarkDao
 import com.abook.data.db.dao.SleepScheduleDao
@@ -27,7 +28,7 @@ object AppModule {
             ABookDatabase::class.java,
             "abook.db"
         )
-            .fallbackToDestructiveMigration()
+            .addMigrations(*ABookMigrations.ALL)
             .build()
     }
 
