@@ -1180,16 +1180,23 @@ class TtsPlaybackService : Service() {
         // quickly on a fresh service — each press would otherwise start its
         // own load pipeline in parallel.
         if (currentLoadJob?.isActive == true) return
-        // Assign the outer launch to currentLoadJob so pause() can cancel
-        // it mid-DB-read. When we reach playBook(), it will cancel US and
-        // install its own currentLoadJob — we exit normally, its new job
-        // takes over.
+
+        // Read DB synchronously inside this coroutine, then call playBook()
+        // directly (no extra launch wrapper).  playBook() will install its
+        // own currentLoadJob.  This avoids the previous outer-launch /
+        // inner-launch nesting where playBook() had to cancel the outer job
+        // before starting its own.
         currentLoadJob = serviceScope.launch {
             try {
                 val book = bookDao.getLastOpenedBook() ?: return@launch
                 ensureActive()
                 val pos = bookDao.getPosition(book.id)
                 ensureActive()
+                // Guard: only proceed to playBook() if nothing is loaded yet.
+                // playBook() itself sets currentBookId and fills chapters, so
+                // this check only ever fires when another flow changed the
+                // state between the DB read and this point.
+                if (currentBookId != null && chapters.isNotEmpty()) return@launch
                 playBook(
                     book.id,
                     pos?.chapterIndex ?: 0,
