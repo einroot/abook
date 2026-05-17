@@ -1077,8 +1077,14 @@ class TtsPlaybackService : Service() {
             this, 0, mediaButtonIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
         )
+        val activityPi = PendingIntent.getActivity(
+            this, 1,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
         mediaSession = MediaSessionCompat(this, "ABookMediaSession").apply {
+            setSessionActivity(activityPi)
             // Preferred way to tell the system where to deliver media buttons
             // when our session is inactive or the service is not running.
             setMediaButtonReceiver(mediaButtonPi)
