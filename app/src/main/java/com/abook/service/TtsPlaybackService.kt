@@ -1108,8 +1108,7 @@ class TtsPlaybackService : Service() {
                 override fun onStop() {
                     Log.d(TAG, "MediaSession.onStop")
                     pause()
-                    // Do NOT stopSelf() — keep the session alive so the next
-                    // headset Play press still reaches us.
+                    stopSelf()
                 }
                 override fun onSkipToNext() {
                     Log.d(TAG, "MediaSession.onSkipToNext")
