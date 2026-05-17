@@ -611,8 +611,11 @@ class TtsPlaybackService : Service() {
         // would cause a brief audio glitch (stop → process → speak again).
         // Happens e.g. when the user taps Play in the UI and the notification
         // simultaneously, or when a stray MediaSession.onPlay fires after
-        // we're already running.
-        if (_playbackState.value.isPlaying && currentSpeakJob?.isActive == true) return
+        // we're already running, or when the double-call path (onStartCommand
+        // after onMediaButtonEvent) reaches here before isPlaying propagates.
+        // Include isCompleted so we also bail out when the previous job has
+        // already finished but currentSpeakJob hasn't yet been nulled.
+        if (_playbackState.value.isPlaying && (currentSpeakJob?.isActive == true || currentSpeakJob?.isCompleted == true)) return
         // Cheap upfront check: nothing to resume if no book loaded.
         if (_playbackState.value.bookId == null || chapters.isEmpty()) return
 
@@ -1243,13 +1246,18 @@ class TtsPlaybackService : Service() {
         // Route media button intents through MediaButtonReceiver. This decodes
         // the KeyEvent and calls mediaSession.controller.dispatchMediaButtonEvent
         // which ends up in our MediaSessionCompat.Callback.
-        if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
-            val keyEvent: KeyEvent? = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
-            Log.d(TAG, "MEDIA_BUTTON intent: keyCode=${keyEvent?.keyCode} action=${keyEvent?.action}")
-            val dispatched = MediaButtonReceiver.handleIntent(mediaSession, intent)
-            Log.d(TAG, "MediaButtonReceiver.handleIntent -> $dispatched")
+        // CRITICAL: if handleIntent dispatches the event (returns true) the
+        // MediaSession callback (onMediaButtonEvent → onPlay/onPause) has
+        // already responded.  Do NOT also fall through to handleCommand for
+        // the same ACTION_MEDIA_BUTTON intent, otherwise resume()/pause()
+        // would fire a SECOND time (Path 2 after Path 1).
+        val mediaButtonHandled =
+            intent?.action == Intent.ACTION_MEDIA_BUTTON &&
+                MediaButtonReceiver.handleIntent(mediaSession, intent)
+        if (mediaButtonHandled) {
+            Log.d(TAG, "Media button event dispatched via MediaSession — skipping handleCommand")
         }
-        return handleCommand(intent, startId)
+        return handleCommand(if (mediaButtonHandled) null else intent, startId)
     }
 
     private fun handleCommand(intent: Intent?, startId: Int): Int {
