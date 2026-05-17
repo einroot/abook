@@ -1262,7 +1262,13 @@ class TtsPlaybackService : Service() {
 
     private fun handleCommand(intent: Intent?, startId: Int): Int {
         when (intent?.action) {
-            ACTION_PLAY -> resume()
+            ACTION_PLAY -> {
+                if (currentBookId == null || chapters.isEmpty()) {
+                    resumeLastPlayedBook()
+                } else {
+                    resume()
+                }
+            }
             ACTION_PAUSE -> pause()
             ACTION_STOP -> {
                 pause()
