@@ -1075,7 +1075,7 @@ class TtsPlaybackService : Service() {
         }
         val mediaButtonPi = PendingIntent.getBroadcast(
             this, 0, mediaButtonIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
         )
 
         mediaSession = MediaSessionCompat(this, "ABookMediaSession").apply {
