@@ -645,6 +645,10 @@ class TtsPlaybackService : Service() {
         _playbackState.update { it.copy(isPlaying = true) }
         requestAudioFocus()
         statsTracker.startSession(bookId, state.currentBookCharOffset)
+        // Anchor ourselves as an audio producer on every resume so headset
+        // button routing keeps pointing at us, even if silent audio anchor was
+        // previously stopped (swipe notification away → onDestroy → destroy).
+        startSilentAudioAnchor()
         speakChapter(state.chapterIndex, state.charOffsetInChapter)
         updateNotification()
     }
