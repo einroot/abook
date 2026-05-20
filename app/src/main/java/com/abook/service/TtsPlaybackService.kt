@@ -116,6 +116,10 @@ class TtsPlaybackService : Service() {
     // pause() and force-sets isPlaying=true — defeating the user's pause.
     private var currentLoadJob: Job? = null
 
+    // Cached callback object so we can re-register the MediaSession
+    // without recreating the callback. Used when reclaiming button priority.
+    private lateinit var mediaSessionCallback: MediaSessionCompat.Callback
+
     // Cached cover bitmap keyed by its path, so buildNotification() does
     // not do disk I/O (BitmapFactory.decodeFile) on the main thread every
     // time play/pause/seek fires. That added 50–200 ms jank per press on
@@ -706,11 +710,9 @@ class TtsPlaybackService : Service() {
 
         // CRITICAL: Aggressively reclaim media button priority.
         // When another app plays audio, Android routes buttons to it.
-        // To reclaim priority we must: deactivate → reactivate → update state.
-        // This makes our session the "most recently active" in Android's eyes.
-        mediaSession.isActive = false
-        mediaSession.isActive = true
-        updateMediaSession()
+        // Simple isActive toggle isn't enough — we must fully re-register
+        // the session so Android sees us as "new" and updates routing.
+        reregisterMediaSession()
 
         _playbackState.update { it.copy(isPlaying = true) }
         requestAudioFocus()
@@ -1121,10 +1123,8 @@ class TtsPlaybackService : Service() {
                         ttsEngine.setVolume(volumeBeforeDuck)
                         // CRITICAL: Aggressively reclaim media button priority.
                         // When another app played audio, Android routed buttons to it.
-                        // Deactivate → reactivate makes us "most recently active".
-                        mediaSession.isActive = false
-                        mediaSession.isActive = true
-                        updateMediaSession()
+                        // Full re-registration makes us "new" in Android's eyes.
+                        reregisterMediaSession()
                         // Restart silent anchor if it was stopped during focus loss.
                         // This re-registers us as the active audio producer with Android's
                         // media routing system.
@@ -1169,6 +1169,90 @@ class TtsPlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        mediaSessionCallback = object : MediaSessionCompat.Callback() {
+            override fun onPlay() {
+                Log.d(TAG, "MediaSession.onPlay")
+                if (currentBookId == null || chapters.isEmpty()) {
+                    resumeLastPlayedBook()
+                } else {
+                    resume()
+                }
+            }
+            override fun onPlayFromSearch(query: String?, extras: android.os.Bundle?) {
+                Log.d(TAG, "MediaSession.onPlayFromSearch query=$query")
+                playFromSearch(query)
+            }
+            override fun onPause() {
+                Log.d(TAG, "MediaSession.onPause")
+                pause()
+            }
+            override fun onStop() {
+                Log.d(TAG, "MediaSession.onStop")
+                pause()
+                // Remove notification but keep service alive so the
+                // MediaSession stays registered — headset Play press
+                // can still wake us up via MediaButtonReceiver.
+                // Use Boolean form for API < 24 compatibility.
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            override fun onSkipToNext() {
+                Log.d(TAG, "MediaSession.onSkipToNext")
+                nextChapter()
+            }
+            override fun onSkipToPrevious() {
+                Log.d(TAG, "MediaSession.onSkipToPrevious")
+                prevChapter()
+            }
+            override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                // Decode the KeyEvent ourselves first — on some devices
+                // (seen on a few Samsung and Chinese OEM builds)
+                // super.onMediaButtonEvent() silently fails to dispatch
+                // PLAY_PAUSE to onPlay/onPause when the session's
+                // PlaybackState hasn't fully synced. Handling the event
+                // manually removes that failure mode entirely.
+                val keyEvent: KeyEvent? =
+                    mediaButtonEvent?.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                Log.d(TAG, "onMediaButtonEvent: key=${keyEvent?.keyCode} action=${keyEvent?.action}")
+
+                if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
+                    val isPlaying = _playbackState.value.isPlaying
+                    when (keyEvent.keyCode) {
+                        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                        KeyEvent.KEYCODE_HEADSETHOOK -> {
+                            if (isPlaying) pause()
+                            else if (currentBookId == null || chapters.isEmpty()) resumeLastPlayedBook()
+                            else resume()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                            if (currentBookId == null || chapters.isEmpty()) resumeLastPlayedBook()
+                            else resume()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                            pause()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_MEDIA_STOP -> {
+                            pause()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                            nextChapter()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                            prevChapter()
+                            return true
+                        }
+                    }
+                }
+                // Fallback: let super try if we didn't match the key.
+                return super.onMediaButtonEvent(mediaButtonEvent)
+            }
+        }
+
         mediaSession = MediaSessionCompat(this, "ABookMediaSession").apply {
             setSessionActivity(activityPi)
             // Preferred way to tell the system where to deliver media buttons
@@ -1180,94 +1264,52 @@ class TtsPlaybackService : Service() {
                 MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
                     MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
             )
-            setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() {
-                    Log.d(TAG, "MediaSession.onPlay")
-                    if (currentBookId == null || chapters.isEmpty()) {
-                        resumeLastPlayedBook()
-                    } else {
-                        resume()
-                    }
-                }
-                override fun onPlayFromSearch(query: String?, extras: android.os.Bundle?) {
-                    Log.d(TAG, "MediaSession.onPlayFromSearch query=$query")
-                    playFromSearch(query)
-                }
-                override fun onPause() {
-                    Log.d(TAG, "MediaSession.onPause")
-                    pause()
-                }
-                override fun onStop() {
-                    Log.d(TAG, "MediaSession.onStop")
-                    pause()
-                    // Remove notification but keep service alive so the
-                    // MediaSession stays registered — headset Play press
-                    // can still wake us up via MediaButtonReceiver.
-                    // Use Boolean form for API < 24 compatibility.
-                    @Suppress("DEPRECATION")
-                    stopForeground(true)
-                }
-                override fun onSkipToNext() {
-                    Log.d(TAG, "MediaSession.onSkipToNext")
-                    nextChapter()
-                }
-                override fun onSkipToPrevious() {
-                    Log.d(TAG, "MediaSession.onSkipToPrevious")
-                    prevChapter()
-                }
-                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
-                    // Decode the KeyEvent ourselves first — on some devices
-                    // (seen on a few Samsung and Chinese OEM builds)
-                    // super.onMediaButtonEvent() silently fails to dispatch
-                    // PLAY_PAUSE to onPlay/onPause when the session's
-                    // PlaybackState hasn't fully synced. Handling the event
-                    // manually removes that failure mode entirely.
-                    val keyEvent: KeyEvent? =
-                        mediaButtonEvent?.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
-                    Log.d(TAG, "onMediaButtonEvent: key=${keyEvent?.keyCode} action=${keyEvent?.action}")
-
-                    if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
-                        val isPlaying = _playbackState.value.isPlaying
-                        when (keyEvent.keyCode) {
-                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-                            KeyEvent.KEYCODE_HEADSETHOOK -> {
-                                if (isPlaying) pause()
-                                else if (currentBookId == null || chapters.isEmpty()) resumeLastPlayedBook()
-                                else resume()
-                                return true
-                            }
-                            KeyEvent.KEYCODE_MEDIA_PLAY -> {
-                                if (currentBookId == null || chapters.isEmpty()) resumeLastPlayedBook()
-                                else resume()
-                                return true
-                            }
-                            KeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                                pause()
-                                return true
-                            }
-                            KeyEvent.KEYCODE_MEDIA_STOP -> {
-                                pause()
-                                return true
-                            }
-                            KeyEvent.KEYCODE_MEDIA_NEXT -> {
-                                nextChapter()
-                                return true
-                            }
-                            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
-                                prevChapter()
-                                return true
-                            }
-                        }
-                    }
-                    // Fallback: let super try if we didn't match the key.
-                    return super.onMediaButtonEvent(mediaButtonEvent)
-                }
-            })
+            setCallback(mediaSessionCallback)
             isActive = true
         }
         // Publish an initial PlaybackState immediately — without it Bluetooth
         // stacks on some Android versions ignore the session.
         updateMediaSession()
+    }
+
+    /**
+     * Completely re-register the MediaSession to reclaim media button priority.
+     * When another app (Spotify, YouTube Music) plays audio, Android routes
+     * buttons to it. Simply toggling isActive isn't enough — we must fully
+     * release and recreate the session so Android sees us as a "new" session
+     * and updates its internal "last active" tracking.
+     */
+    private fun reregisterMediaSession() {
+        val oldSession = mediaSession
+        val activityPi = PendingIntent.getActivity(
+            this, 1,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+            setClass(this@TtsPlaybackService, MediaButtonReceiver::class.java)
+        }
+        val mediaButtonPi = PendingIntent.getBroadcast(
+            this, 0, mediaButtonIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+        )
+
+        mediaSession = MediaSessionCompat(this, "ABookMediaSession").apply {
+            setSessionActivity(activityPi)
+            setMediaButtonReceiver(mediaButtonPi)
+            @Suppress("DEPRECATION")
+            setFlags(
+                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
+                    MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+            )
+            setCallback(mediaSessionCallback)
+            isActive = true
+        }
+        updateMediaSession()
+
+        // Release old session after new one is registered
+        try { oldSession.release() } catch (_: Exception) {}
+        Log.d(TAG, "MediaSession re-registered to reclaim button priority")
     }
 
     /**
@@ -1354,9 +1396,7 @@ class TtsPlaybackService : Service() {
         // If we're being started by a media button, aggressively re-claim
         // our session priority — other apps may have hijacked it.
         if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
-            mediaSession.isActive = false
-            mediaSession.isActive = true
-            updateMediaSession()
+            reregisterMediaSession()
         }
 
         // Route media button intents through MediaButtonReceiver. This decodes
