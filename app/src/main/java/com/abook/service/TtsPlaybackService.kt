@@ -704,10 +704,12 @@ class TtsPlaybackService : Service() {
         val state = _playbackState.value
         val bookId = state.bookId ?: return
 
-        // CRITICAL: Re-assert MediaSession BEFORE requesting focus.
-        // This tells Android we're the intended media controller and
-        // helps reclaim media button priority from other apps.
-        if (!mediaSession.isActive) mediaSession.isActive = true
+        // CRITICAL: Aggressively reclaim media button priority.
+        // When another app plays audio, Android routes buttons to it.
+        // To reclaim priority we must: deactivate → reactivate → update state.
+        // This makes our session the "most recently active" in Android's eyes.
+        mediaSession.isActive = false
+        mediaSession.isActive = true
         updateMediaSession()
 
         _playbackState.update { it.copy(isPlaying = true) }
@@ -1117,10 +1119,11 @@ class TtsPlaybackService : Service() {
                     }
                     AudioManager.AUDIOFOCUS_GAIN -> {
                         ttsEngine.setVolume(volumeBeforeDuck)
-                        // CRITICAL: Re-assert MediaSession priority when focus returns.
-                        // Android doesn't automatically give media buttons back to us —
-                        // we must explicitly re-activate the session and update state.
-                        if (!mediaSession.isActive) mediaSession.isActive = true
+                        // CRITICAL: Aggressively reclaim media button priority.
+                        // When another app played audio, Android routed buttons to it.
+                        // Deactivate → reactivate makes us "most recently active".
+                        mediaSession.isActive = false
+                        mediaSession.isActive = true
                         updateMediaSession()
                         // Restart silent anchor if it was stopped during focus loss.
                         // This re-registers us as the active audio producer with Android's
@@ -1351,7 +1354,8 @@ class TtsPlaybackService : Service() {
         // If we're being started by a media button, aggressively re-claim
         // our session priority — other apps may have hijacked it.
         if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
-            if (!mediaSession.isActive) mediaSession.isActive = true
+            mediaSession.isActive = false
+            mediaSession.isActive = true
             updateMediaSession()
         }
 
