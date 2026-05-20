@@ -1273,9 +1273,12 @@ class TtsPlaybackService : Service() {
         // already responded.  Do NOT also fall through to handleCommand for
         // the same ACTION_MEDIA_BUTTON intent, otherwise resume()/pause()
         // would fire a SECOND time (Path 2 after Path 1).
-        val mediaButtonHandled =
-            intent?.action == Intent.ACTION_MEDIA_BUTTON &&
-                MediaButtonReceiver.handleIntent(mediaSession, intent)
+        val isMediaButton = intent?.action == Intent.ACTION_MEDIA_BUTTON
+        val mediaButtonHandled = if (isMediaButton && intent != null) {
+            androidx.media.session.MediaButtonReceiver.handleIntent(mediaSession, intent) as Boolean
+        } else {
+            false
+        }
 
         if (mediaButtonHandled) {
             Log.d(TAG, "Media button event dispatched via MediaSession — skipping handleCommand")
