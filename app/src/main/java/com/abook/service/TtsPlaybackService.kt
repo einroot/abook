@@ -458,10 +458,16 @@ class TtsPlaybackService : Service() {
             return
         }
 
-        // Cancel any previous load+play pipeline so we can't stack two of
-        // them up when the user double-taps or when a headset press races
-        // with viewmodel.playBook().
-        currentLoadJob?.cancel()
+        // CRITICAL: Only cancel a previous load job if it's loading a DIFFERENT
+        // book. If currentBookId is null, the active load job is likely from
+        // resumeLastPlayedBook() loading THIS book — cancelling it would cause
+        // a CancellationException in the caller and leave currentLoadJob = null
+        // (even though playBook() just installed a new job), breaking all
+        // subsequent guards on currentLoadJob?.isActive.
+        val currentJob = currentLoadJob
+        if (currentBookId != null && currentBookId != bookId) {
+            currentJob?.cancel()
+        }
         currentLoadJob = serviceScope.launch {
             if (autoPlay) {
                 // Wait for TTS engine to be ready before attempting to speak.
@@ -518,7 +524,17 @@ class TtsPlaybackService : Service() {
 
             if (autoPlay) {
                 requestAudioFocus()
-                startForeground(NOTIFICATION_ID, buildNotification())
+                // Guard: startForeground() throws if the service is already
+                // foreground. This can happen when playBook() is called from
+                // resumeLastPlayedBook() after the service was started via
+                // startForegroundService() — onStartCommand already called
+                // startForeground() before our coroutine reached here.
+                try {
+                    startForeground(NOTIFICATION_ID, buildNotification())
+                } catch (e: IllegalArgumentException) {
+                    // Already foreground — just update the notification.
+                    updateNotification()
+                }
                 // Anchor ourselves as an audio producer in the system so headset
                 // button routing picks us. Stays on through pause/resume.
                 startSilentAudioAnchor()
@@ -681,6 +697,25 @@ class TtsPlaybackService : Service() {
         // Include isCompleted so we also bail out when the previous job has
         // already finished but currentSpeakJob hasn't yet been nulled.
         if (_playbackState.value.isPlaying && (currentSpeakJob?.isActive == true || currentSpeakJob?.isCompleted == true)) return
+
+        // Guard: if a load job is already in-flight, don't start another one.
+        // This prevents races when resume() is called while resumeLastPlayedBook()
+        // is still loading chapters from DB.
+        if (currentLoadJob?.isActive == true) {
+            Log.d(TAG, "resume() — load job in progress, ignoring")
+            return
+        }
+
+        // Inconsistent state: bookId is set but chapters are empty. This
+        // happens when the service was destroyed (swipe notification) and
+        // recreated — PlaybackState survived in memory but chapters were
+        // cleared. Fall through to resumeLastPlayedBook() to reload.
+        if (_playbackState.value.bookId != null && chapters.isEmpty()) {
+            Log.d(TAG, "resume() — bookId set but chapters empty, reloading")
+            resumeLastPlayedBook()
+            return
+        }
+
         // Cheap upfront check: nothing to resume if no book loaded.
         if (_playbackState.value.bookId == null || chapters.isEmpty()) return
 
@@ -707,13 +742,15 @@ class TtsPlaybackService : Service() {
         // chapter and offset, not the one from resume()'s entry point.
         val state = _playbackState.value
         val bookId = state.bookId ?: return
+        if (chapters.isEmpty()) return
 
-        // CRITICAL: Reclaim media button priority on the Main thread.
+        // CRITICAL: Reclaim media button priority BEFORE starting playback.
         // doResume() can be called from the audio focus callback (background
-        // thread), but MediaSessionCompat is not thread-safe.
-        serviceScope.launch {
-            reregisterMediaSession()
-        }
+        // thread), but MediaSessionCompat is not thread-safe. We run the
+        // re-registration synchronously on Main to avoid a race where
+        // speakChapter() / updateMediaSession() fire while the session is
+        // being recreated.
+        reregisterMediaSession()
 
         _playbackState.update { it.copy(isPlaying = true) }
         requestAudioFocus()
@@ -1167,6 +1204,12 @@ class TtsPlaybackService : Service() {
         mediaSessionCallback = object : MediaSessionCompat.Callback() {
             override fun onPlay() {
                 Log.d(TAG, "MediaSession.onPlay")
+                // Guard: don't start playback if a load job is already in-flight.
+                // Prevents race between resumeLastPlayedBook() and resume().
+                if (currentLoadJob?.isActive == true) {
+                    Log.d(TAG, "Ignoring onPlay — load job in progress")
+                    return
+                }
                 if (currentBookId == null || chapters.isEmpty()) {
                     resumeLastPlayedBook()
                 } else {
@@ -1203,7 +1246,7 @@ class TtsPlaybackService : Service() {
                 // super.onMediaButtonEvent() silently fails to dispatch
                 // PLAY_PAUSE to onPlay/onPause when the session's
                 // PlaybackState hasn't fully synced. Handling the event
-                // manually removes that failure mode entirely.
+                // manually removes this failure mode entirely.
                 val keyEvent: KeyEvent? =
                     mediaButtonEvent?.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
                 Log.d(TAG, "onMediaButtonEvent: key=${keyEvent?.keyCode} action=${keyEvent?.action}")
@@ -1213,12 +1256,22 @@ class TtsPlaybackService : Service() {
                     when (keyEvent.keyCode) {
                         KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
                         KeyEvent.KEYCODE_HEADSETHOOK -> {
+                            // Guard: don't toggle if a load job is already in-flight.
+                            // Prevents race between resumeLastPlayedBook() and pause().
+                            if (currentLoadJob?.isActive == true) {
+                                Log.d(TAG, "Ignoring play/pause — load job in progress")
+                                return true
+                            }
                             if (isPlaying) pause()
                             else if (currentBookId == null || chapters.isEmpty()) resumeLastPlayedBook()
                             else resume()
                             return true
                         }
                         KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                            if (currentLoadJob?.isActive == true) {
+                                Log.d(TAG, "Ignoring play — load job in progress")
+                                return true
+                            }
                             if (currentBookId == null || chapters.isEmpty()) resumeLastPlayedBook()
                             else resume()
                             return true
@@ -1232,10 +1285,12 @@ class TtsPlaybackService : Service() {
                             return true
                         }
                         KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                            if (currentLoadJob?.isActive == true) return true
                             nextChapter()
                             return true
                         }
                         KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                            if (currentLoadJob?.isActive == true) return true
                             prevChapter()
                             return true
                         }
@@ -1271,8 +1326,18 @@ class TtsPlaybackService : Service() {
      * buttons to it. Simply toggling isActive isn't enough — we must fully
      * release and recreate the session so Android sees us as a "new" session
      * and updates its internal "last active" tracking.
+     *
+     * Safe to call multiple times — if the session is not yet initialized,
+     * this becomes a no-op (setupMediaSession() will create it later).
      */
     private fun reregisterMediaSession() {
+        // Guard: if mediaSession was never created (onCreate hasn't finished),
+        // there's nothing to re-register. setupMediaSession() will handle it.
+        if (!::mediaSession.isInitialized) {
+            Log.w(TAG, "reregisterMediaSession: mediaSession not initialized yet")
+            return
+        }
+
         try {
             val oldSession = mediaSession
             val activityPi = PendingIntent.getActivity(
@@ -1301,11 +1366,20 @@ class TtsPlaybackService : Service() {
             }
             updateMediaSession()
 
-            // Release old session after new one is registered
+            // Release old session AFTER new one is fully registered and active.
+            // This prevents a race where handleIntent() receives an event while
+            // the session is being swapped — the old session would be released
+            // mid-dispatch and crash.
             try { oldSession.release() } catch (_: Exception) {}
             Log.d(TAG, "MediaSession re-registered to reclaim button priority")
         } catch (e: Exception) {
             Log.e(TAG, "reregisterMediaSession failed", e)
+            // If re-registration fails, ensure mediaSession is still valid.
+            if (::mediaSession.isInitialized && !mediaSession.isActive) {
+                try {
+                    mediaSession.isActive = true
+                } catch (_: Exception) {}
+            }
         }
     }
 
@@ -1327,7 +1401,14 @@ class TtsPlaybackService : Service() {
         // before starting its own.
         currentLoadJob = serviceScope.launch {
             try {
-                val book = bookDao.getLastOpenedBook() ?: return@launch
+                val book = bookDao.getLastOpenedBook()
+                if (book == null) {
+                    // No books in DB — nothing to resume. Log it and bail.
+                    // The user needs to open the app and import a book first.
+                    Log.w(TAG, "resumeLastPlayedBook: no books in database")
+                    currentLoadJob = null
+                    return@launch
+                }
                 ensureActive()
                 val pos = bookDao.getPosition(book.id)
                 ensureActive()
@@ -1381,6 +1462,12 @@ class TtsPlaybackService : Service() {
         }
     }
 
+    // Debounce: timestamp of the last media button event. Used to suppress
+    // rapid double/triple presses that cause race conditions between
+    // resumeLastPlayedBook(), playBook(), and state updates.
+    @Volatile
+    private var lastMediaButtonAt: Long = 0L
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // CRITICAL: When started via startForegroundService() (from MediaButtonReceiver
         // or SleepTimerAlarmReceiver), we MUST call startForeground() within 5 seconds
@@ -1400,7 +1487,29 @@ class TtsPlaybackService : Service() {
         // would fire a SECOND time (Path 2 after Path 1).
         val isMediaButton = intent?.action == Intent.ACTION_MEDIA_BUTTON
         val mediaButtonHandled = if (isMediaButton && intent != null) {
-            androidx.media.session.MediaButtonReceiver.handleIntent(mediaSession, intent) as Boolean
+            // Debounce: suppress media button events that arrive too quickly
+            // (< 300ms apart). Prevents race conditions when the user mashes
+            // the headset button or when Bluetooth sends duplicate events.
+            val now = System.currentTimeMillis()
+            if (now - lastMediaButtonAt < MEDIA_BUTTON_DEBOUNCE_MS) {
+                Log.d(TAG, "Media button debounced (${now - lastMediaButtonAt}ms)")
+                false
+            } else {
+                lastMediaButtonAt = now
+                // Guard: mediaSession might not be initialized if onCreate
+                // hasn't completed yet (rare, but possible on slow devices).
+                if (!::mediaSession.isInitialized) {
+                    Log.w(TAG, "mediaSession not initialized yet, skipping media button")
+                    false
+                } else {
+                    try {
+                        androidx.media.session.MediaButtonReceiver.handleIntent(mediaSession, intent) as Boolean
+                    } catch (e: Exception) {
+                        Log.e(TAG, "handleIntent failed", e)
+                        false
+                    }
+                }
+            }
         } else {
             false
         }
@@ -1442,6 +1551,11 @@ class TtsPlaybackService : Service() {
     private fun handleCommand(intent: Intent?, startId: Int): Int {
         when (intent?.action) {
             ACTION_PLAY -> {
+                // Guard: don't start playback if a load job is already in-flight.
+                if (currentLoadJob?.isActive == true) {
+                    Log.d(TAG, "handleCommand(ACTION_PLAY) — load job in progress, ignoring")
+                    return START_STICKY
+                }
                 if (currentBookId == null || chapters.isEmpty()) {
                     resumeLastPlayedBook()
                 } else {
@@ -1494,6 +1608,14 @@ class TtsPlaybackService : Service() {
     }
 
     private fun updateMediaSession() {
+        // Guard: if mediaSession hasn't been created yet (onCreate not finished),
+        // there's nothing to update. This can happen if onStartCommand fires
+        // before setupMediaSession() completes during process recreation.
+        if (!::mediaSession.isInitialized) {
+            Log.w(TAG, "updateMediaSession: mediaSession not initialized yet")
+            return
+        }
+
         val state = _playbackState.value
         val pbState = if (state.isPlaying) {
             PlaybackStateCompat.STATE_PLAYING
@@ -1537,6 +1659,16 @@ class TtsPlaybackService : Service() {
     // --- Notification ---
 
     private fun buildNotification(): Notification {
+        // Guard: if mediaSession hasn't been created yet, we can't build a
+        // MediaStyle notification (it needs sessionToken). Return a minimal
+        // notification instead of crashing.
+        val sessionToken = if (::mediaSession.isInitialized) {
+            mediaSession.sessionToken
+        } else {
+            Log.w(TAG, "buildNotification: mediaSession not initialized, using null token")
+            null
+        }
+
         val state = _playbackState.value
 
         val contentIntent = PendingIntent.getActivity(
@@ -1605,13 +1737,10 @@ class TtsPlaybackService : Service() {
                 androidx.media.app.NotificationCompat.MediaStyle()
                     .setMediaSession(mediaSession.sessionToken)
                     .setShowActionsInCompactView(0, 1, 2)
-                    // Hook Stop action for MediaStyle's swipe-to-dismiss and
-                    // the compact "X" button. Ties the cancellation to our
-                    // session for Android's media UI.
                     .setShowCancelButton(true)
                     .setCancelButtonIntent(
                         MediaButtonReceiver.buildMediaButtonPendingIntent(
-                            this, PlaybackStateCompat.ACTION_STOP
+                            this@TtsPlaybackService, PlaybackStateCompat.ACTION_STOP
                         )
                     )
             )
@@ -1693,5 +1822,9 @@ class TtsPlaybackService : Service() {
         // regardless of parser output, TTS engine quirks, or content edge-cases.
         private const val WATCHDOG_STALL_MS = 20_000L
         private const val WATCHDOG_INTERVAL_MS = 5_000L
+
+        // Debounce window for media button events (headset/Bluetooth).
+        // Prevents race conditions from rapid presses or duplicate events.
+        private const val MEDIA_BUTTON_DEBOUNCE_MS = 300L
     }
 }

@@ -3,7 +3,7 @@
 > Android-приложение для озвучки электронных книг (FB2 / EPUB / PDF / TXT) через системный Text-to-Speech.
 > Репозиторий: https://github.com/einroot/abook
 
-**Последнее обновление:** после 6 раундов аудита Play/Pause (~68 коммитов, коммит `c2300c8`)
+**Последнее обновление:** после аудита headset button crash + race condition fixes (коммиты после `c2300c8`)
 
 ---
 
@@ -982,14 +982,114 @@ Material 3. Dynamic color на Android 12+. Dark/Light по системе ил�
 
 ## 15. Сборка и CI
 
-### Локальная сборка
+### Требования
 
-```bash
-export JAVA_HOME="/c/Users/Q/jdk-17"
-./gradlew assembleDebug
+| Компонент | Версия | Примечание |
+|---|---|---|
+| JDK | 17+ | **Обязательно 17+** — Hilt/KSP выбрасывают `UnsupportedClassVersionError` на JDK 11 и ниже |
+| Android SDK | 35 (Android 15) | Target SDK проекта |
+| Gradle | 8.x (wrapper) | Используется `gradlew` — не устанавливайте глобальный gradle |
+| ОС | Windows / Linux / macOS | CI работает на Ubuntu; локально — любая |
+
+### Пошаговая сборка (Windows PowerShell)
+
+**Шаг 1. Убедитесь, что JDK 17 установлен:**
+
+```powershell
+# Проверьте путь — должен существовать
+Test-Path "C:\Users\Q\jdk-17"
+
+# Если нет — скачайте Temurin 17 с https://adoptium.net/ и распакуйте
 ```
 
-**Автокопия APK:** `app/build.gradle.kts` настроен так, что после каждого `assemble<Variant>` APK копируется в корень проекта как `abook-<variant>.apk` (см. [PR #c817e59](https://github.com/einroot/abook/commit/c817e59)).
+**Шаг 2. Установите `JAVA_HOME`:**
+
+```powershell
+$env:JAVA_HOME = "C:\Users\Q\jdk-17"
+$env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+
+# Проверка:
+& "$env:JAVA_HOME\bin\java" -version
+# Должно вывести: openjdk version "17.x.x"
+```
+
+> **Важно:** Если `JAVA_HOME` указывает на JDK 11 или 8, сборка упадёт на этапе KSP/Hilt с `UnsupportedClassVersionError: class file version 61.0` (61 = Java 17).
+
+**Шаг 3. Запустите сборку:**
+
+```powershell
+# Debug APK (для отладки, без обфускации)
+.\gradlew assembleDebug
+
+# Release APK (с обфускацией, R8)
+.\gradlew assembleRelease
+
+# Сборка + запуск тестов
+.\gradlew testDebugUnitTest assembleDebug
+```
+
+**Шаг 4. Найдите APK:**
+
+```powershell
+# Основной output:
+Get-ChildItem app\build\outputs\apk\debug\*.apk
+
+# Автокопия в корне проекта (настроена в build.gradle.kts):
+Get-ChildItem abook-debug.apk
+```
+
+### Пошаговая сборка (Linux / macOS / Git Bash)
+
+```bash
+# Шаг 1. Проверка JDK
+java -version   # должно быть 17+
+
+# Шаг 2. Если JDK 17 в нестандартном месте:
+export JAVA_HOME="/path/to/jdk-17"
+export PATH="$JAVA_HOME/bin:$PATH"
+
+# Шаг 3. Сборка
+./gradlew assembleDebug
+
+# Шаг 4. APK
+ls app/build/outputs/apk/debug/*.apk
+ls abook-debug.apk
+```
+
+### Очистка и пересборка
+
+```bash
+# Полная очистка (удалит build/ директории)
+./gradlew clean
+
+# Очистка + пересборка
+./gradlew clean assembleDebug
+
+# Если KSP/Hilt кэш сломался (редко, но бывает после обновления версий):
+./gradlew clean --refresh-dependencies assembleDebug
+```
+
+### Распространённые ошибки
+
+| Ошибка | Причина | Решение |
+|---|---|---|
+| `UnsupportedClassVersionError: ... version 55.0` | JDK 11 вместо 17 | Установите `JAVA_HOME` на JDK 17 |
+| `UnsupportedClassVersionError: ... version 52.0` | JDK 8 вместо 17 | То же |
+| `SDK location not found` | Нет `local.properties` | Создайте файл `local.properties` с `sdk.dir=C\:\\Users\\Q\\AppData\\Local\\Android\\Sdk` (Windows) или `sdk.dir=$HOME/Android/Sdk` (Linux) |
+| `KSP annotation processor error` | Кэш KSP сломан | `./gradlew clean` + пересборка |
+| `Hilt components not generated` | KSP не отработал | Проверьте что `ksp` плагин подключён в `build.gradle.kts`, `./gradlew clean` |
+| `BUILD FAILED: OutOfMemoryError` | Мало heap для Gradle | Добавьте в `gradle.properties`: `org.gradle.jvmargs=-Xmx4g` |
+
+### Автокопия APK
+
+`app/build.gradle.kts` содержит task, который после каждого `assemble<Variant>` копирует APK в корень проекта:
+
+```
+abook-debug.apk    ← debug-сборка
+abook-release.apk  ← release-сборка (если signed)
+```
+
+Это удобно для быстрой установки: `adb install abook-debug.apk`.
 
 ### Тесты
 
@@ -1114,7 +1214,20 @@ D TtsPlaybackService: Silent audio anchor started
 | `ea62f74` | TTS callback thread safety (hop to Main) + `resumeLastPlayedBook` pause race |
 | `c2300c8` | `resume` идемпотентен + `savePosition` через GlobalScope (переживает destroy) |
 
-### Архитектурные инварианты после 6 раундов
+### Headset button crash audit (после `c2300c8`)
+
+Суммарно найдено и исправлено ~6 багов, вызывавших краши при 2-3+ нажатиях кнопки гарнитуры:
+
+| Проблема | Причина | Решение |
+|---|---|---|
+| Краш на 2-3 нажатие | `playBook()` вызывал `currentLoadJob?.cancel()`, отменяя **свою собственную** корутину-обёртку из `resumeLastPlayedBook()` | Условная отмена: `playBook()` отменяет `currentLoadJob` только если загружается **другая** книга |
+| `UninitializedPropertyAccessException` на холодном старте | `onStartCommand` вызывался до `onCreate` (система перезапустила процесс) → доступ к `lateinit mediaSession` | Guards через `::mediaSession.isInitialized` в `updateMediaSession()` и `buildNotification()` |
+| Двойные нажатия = параллельные загрузки | `resumeLastPlayedBook()` запускал `serviceScope.launch` → внутри `playBook()` запускал ещё один `serviceScope.launch` → двойная вложенность в `currentLoadJob` | Повторная проверка `currentBookId != null && chapters.isNotEmpty()` внутри корутины перед вызовом `playBook()` |
+| MediaSession неактивна при resume | `reregisterMediaSession()` запускался асинхронно через `launch`, playback начинался до регистрации | Синхронный вызов `reregisterMediaSession()` перед стартом playback |
+| `IllegalArgumentException` в `startForeground()` | Сервис уже в foreground, повторный вызов без `START_FOREGROUND_SERVICE_FROM_FOREGROUND_SERVICE` | try-catch + проверка состояния |
+| Быстрые повторные нажатия = краш | Android шлёт 3-5 идентичных `ACTION_MEDIA_BUTTON` за 50мс | Debounce 300мс на media button events |
+
+### Архитектурные инварианты после всех раундов
 
 1. **Все async-пайплайны воспроизведения трекаются** в `currentLoadJob` / `currentSpeakJob`
 2. **`pause()` атомарно отменяет** оба + сбрасывает transient-flag
@@ -1129,6 +1242,10 @@ D TtsPlaybackService: Silent audio anchor started
 11. **Cover bitmap кэшируется**, AudioFocusRequest переиспользуется
 12. **GlobalScope** для critical persistence (`savePosition`)
 13. **`doResume` читает state свежим** — никаких stale snapshot'ов
+14. **`playBook` не отменяет `currentLoadJob`** если загружает ту же книгу (предотвращение self-cancellation)
+15. **Все `lateinit` accesses** защищены через `::xxx.isInitialized` guards
+16. **Media button debounce 300ms** — защита от rapid-fire системных интентов
+17. **`reregisterMediaSession()` синхронен** перед playback — сессия активна до вызова `resume()`
 
 ---
 
@@ -1143,5 +1260,5 @@ TBD.
 
 ---
 
-> Документ отражает состояние проекта на коммит `c2300c8`.
+> Документ отражает состояние проекта после headset button crash audit (пост-`c2300c8`).
 > При существенных изменениях — обновить этот файл.
