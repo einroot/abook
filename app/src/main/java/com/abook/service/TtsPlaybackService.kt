@@ -642,6 +642,13 @@ class TtsPlaybackService : Service() {
         // chapter and offset, not the one from resume()'s entry point.
         val state = _playbackState.value
         val bookId = state.bookId ?: return
+
+        // CRITICAL: Re-assert MediaSession BEFORE requesting focus.
+        // This tells Android we're the intended media controller and
+        // helps reclaim media button priority from other apps.
+        if (!mediaSession.isActive) mediaSession.isActive = true
+        updateMediaSession()
+
         _playbackState.update { it.copy(isPlaying = true) }
         requestAudioFocus()
         statsTracker.startSession(bookId, state.currentBookCharOffset)
@@ -1043,6 +1050,15 @@ class TtsPlaybackService : Service() {
                     }
                     AudioManager.AUDIOFOCUS_GAIN -> {
                         ttsEngine.setVolume(volumeBeforeDuck)
+                        // CRITICAL: Re-assert MediaSession priority when focus returns.
+                        // Android doesn't automatically give media buttons back to us —
+                        // we must explicitly re-activate the session and update state.
+                        if (!mediaSession.isActive) mediaSession.isActive = true
+                        updateMediaSession()
+                        // Restart silent anchor if it was stopped during focus loss.
+                        // This re-registers us as the active audio producer with Android's
+                        // media routing system.
+                        startSilentAudioAnchor()
                         // Auto-resume if we were paused by a transient loss
                         // (call ended, etc). Matches Spotify / YouTube Music
                         // behaviour. Do nothing if user paused manually.
@@ -1264,6 +1280,13 @@ class TtsPlaybackService : Service() {
         // so that buildNotification() reads the correct, post-command state.
 
         Log.d(TAG, "onStartCommand action=${intent?.action} extras=${intent?.extras?.keySet()}")
+
+        // If we're being started by a media button, aggressively re-claim
+        // our session priority — other apps may have hijacked it.
+        if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
+            if (!mediaSession.isActive) mediaSession.isActive = true
+            updateMediaSession()
+        }
 
         // Route media button intents through MediaButtonReceiver. This decodes
         // the KeyEvent and calls mediaSession.controller.dispatchMediaButtonEvent
