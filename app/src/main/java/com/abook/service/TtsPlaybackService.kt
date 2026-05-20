@@ -708,11 +708,12 @@ class TtsPlaybackService : Service() {
         val state = _playbackState.value
         val bookId = state.bookId ?: return
 
-        // CRITICAL: Aggressively reclaim media button priority.
-        // When another app plays audio, Android routes buttons to it.
-        // Simple isActive toggle isn't enough — we must fully re-register
-        // the session so Android sees us as "new" and updates routing.
-        reregisterMediaSession()
+        // CRITICAL: Reclaim media button priority on the Main thread.
+        // doResume() can be called from the audio focus callback (background
+        // thread), but MediaSessionCompat is not thread-safe.
+        serviceScope.launch {
+            reregisterMediaSession()
+        }
 
         _playbackState.update { it.copy(isPlaying = true) }
         requestAudioFocus()
@@ -1121,13 +1122,7 @@ class TtsPlaybackService : Service() {
                     }
                     AudioManager.AUDIOFOCUS_GAIN -> {
                         ttsEngine.setVolume(volumeBeforeDuck)
-                        // CRITICAL: Aggressively reclaim media button priority.
-                        // When another app played audio, Android routed buttons to it.
-                        // Full re-registration makes us "new" in Android's eyes.
-                        reregisterMediaSession()
                         // Restart silent anchor if it was stopped during focus loss.
-                        // This re-registers us as the active audio producer with Android's
-                        // media routing system.
                         startSilentAudioAnchor()
                         // Auto-resume if we were paused by a transient loss
                         // (call ended, etc). Matches Spotify / YouTube Music
@@ -1280,36 +1275,40 @@ class TtsPlaybackService : Service() {
      * and updates its internal "last active" tracking.
      */
     private fun reregisterMediaSession() {
-        val oldSession = mediaSession
-        val activityPi = PendingIntent.getActivity(
-            this, 1,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
-            setClass(this@TtsPlaybackService, MediaButtonReceiver::class.java)
-        }
-        val mediaButtonPi = PendingIntent.getBroadcast(
-            this, 0, mediaButtonIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
-        )
-
-        mediaSession = MediaSessionCompat(this, "ABookMediaSession").apply {
-            setSessionActivity(activityPi)
-            setMediaButtonReceiver(mediaButtonPi)
-            @Suppress("DEPRECATION")
-            setFlags(
-                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
-                    MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+        try {
+            val oldSession = mediaSession
+            val activityPi = PendingIntent.getActivity(
+                this, 1,
+                Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            setCallback(mediaSessionCallback)
-            isActive = true
-        }
-        updateMediaSession()
+            val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+                setClass(this@TtsPlaybackService, MediaButtonReceiver::class.java)
+            }
+            val mediaButtonPi = PendingIntent.getBroadcast(
+                this, 0, mediaButtonIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            )
 
-        // Release old session after new one is registered
-        try { oldSession.release() } catch (_: Exception) {}
-        Log.d(TAG, "MediaSession re-registered to reclaim button priority")
+            mediaSession = MediaSessionCompat(this, "ABookMediaSession").apply {
+                setSessionActivity(activityPi)
+                setMediaButtonReceiver(mediaButtonPi)
+                @Suppress("DEPRECATION")
+                setFlags(
+                    MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
+                        MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+                )
+                setCallback(mediaSessionCallback)
+                isActive = true
+            }
+            updateMediaSession()
+
+            // Release old session after new one is registered
+            try { oldSession.release() } catch (_: Exception) {}
+            Log.d(TAG, "MediaSession re-registered to reclaim button priority")
+        } catch (e: Exception) {
+            Log.e(TAG, "reregisterMediaSession failed", e)
+        }
     }
 
     /**
@@ -1392,12 +1391,6 @@ class TtsPlaybackService : Service() {
         // so that buildNotification() reads the correct, post-command state.
 
         Log.d(TAG, "onStartCommand action=${intent?.action} extras=${intent?.extras?.keySet()}")
-
-        // If we're being started by a media button, aggressively re-claim
-        // our session priority — other apps may have hijacked it.
-        if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
-            reregisterMediaSession()
-        }
 
         // Route media button intents through MediaButtonReceiver. This decodes
         // the KeyEvent and calls mediaSession.controller.dispatchMediaButtonEvent
