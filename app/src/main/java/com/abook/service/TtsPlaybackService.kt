@@ -1114,7 +1114,12 @@ class TtsPlaybackService : Service() {
                 override fun onStop() {
                     Log.d(TAG, "MediaSession.onStop")
                     pause()
-                    stopSelf()
+                    // Remove notification but keep service alive so the
+                    // MediaSession stays registered — headset Play press
+                    // can still wake us up via MediaButtonReceiver.
+                    // Use Boolean form for API < 24 compatibility.
+                    @Suppress("DEPRECATION")
+                    stopForeground(true)
                 }
                 override fun onSkipToNext() {
                     Log.d(TAG, "MediaSession.onSkipToNext")
@@ -1212,9 +1217,11 @@ class TtsPlaybackService : Service() {
                     pos?.charOffsetInChapter ?: 0
                 )
             } catch (e: CancellationException) {
+                currentLoadJob = null
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "resumeLastPlayedBook failed", e)
+                currentLoadJob = null
             }
         }
     }
@@ -1240,9 +1247,11 @@ class TtsPlaybackService : Service() {
                     pos?.charOffsetInChapter ?: 0
                 )
             } catch (e: CancellationException) {
+                currentLoadJob = null
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "playFromSearch failed", e)
+                currentLoadJob = null
             }
         }
     }
@@ -1250,12 +1259,9 @@ class TtsPlaybackService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // CRITICAL: When started via startForegroundService() (from MediaButtonReceiver
         // or SleepTimerAlarmReceiver), we MUST call startForeground() within 5 seconds
-        // or Android kills the process. Do it immediately for ALL intents to be safe.
-        try {
-            startForeground(NOTIFICATION_ID, buildNotification())
-        } catch (_: Exception) {
-            // May fail if notification channel not ready; non-fatal for non-foreground starts
-        }
+        // or Android kills the process. All preparatory work (routing media-button intents,
+        // loading book data, updating playback state) must happen BEFORE startForeground()
+        // so that buildNotification() reads the correct, post-command state.
 
         Log.d(TAG, "onStartCommand action=${intent?.action} extras=${intent?.extras?.keySet()}")
 
@@ -1270,10 +1276,39 @@ class TtsPlaybackService : Service() {
         val mediaButtonHandled =
             intent?.action == Intent.ACTION_MEDIA_BUTTON &&
                 MediaButtonReceiver.handleIntent(mediaSession, intent)
+
         if (mediaButtonHandled) {
             Log.d(TAG, "Media button event dispatched via MediaSession — skipping handleCommand")
+        } else {
+            // Process the command FIRST so _playbackState / chapters / currentBookId
+            // reflect the action's outcome before buildNotification() reads them.
+            handleCommand(intent, startId)
         }
-        return handleCommand(if (mediaButtonHandled) null else intent, startId)
+
+        // Now that state is settled, build and post the foreground notification.
+        // Build it inside a single try-catch so that a failure here doesn't
+        // silently leave the service stranded without a foreground promotion.
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed — buildNotification threw", e)
+            // As a safety net, attempt a bare-minimum notification that won't
+            // reference potentially corrupted state.
+            try {
+                val fallback = NotificationCompat.Builder(this, ABookApplication.CHANNEL_PLAYBACK)
+                    .setSmallIcon(R.drawable.ic_notif_small)
+                    .setContentTitle(getString(R.string.app_name))
+                    .setOngoing(true)
+                    .setSilent(true)
+                    .build()
+                startForeground(NOTIFICATION_ID, fallback)
+            } catch (e2: Exception) {
+                Log.e(TAG, "Fallback startForeground also failed", e2)
+                // Nothing more we can do — let the system handle it.
+            }
+        }
+
+        return START_STICKY
     }
 
     private fun handleCommand(intent: Intent?, startId: Int): Int {
@@ -1478,7 +1513,10 @@ class TtsPlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        Log.d(TAG, "onDestroy")
         savePosition()
+        @Suppress("DEPRECATION")
+        stopForeground(true)
         // Clear callbacks to prevent stale closure access after destruction
         sleepTimerManager.onVolumeChange = null
         sleepTimerManager.onTimerExpired = null
