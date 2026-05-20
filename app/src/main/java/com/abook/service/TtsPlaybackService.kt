@@ -1184,12 +1184,10 @@ class TtsPlaybackService : Service() {
             override fun onStop() {
                 Log.d(TAG, "MediaSession.onStop")
                 pause()
-                // Remove notification but keep service alive so the
-                // MediaSession stays registered — headset Play press
-                // can still wake us up via MediaButtonReceiver.
-                // Use Boolean form for API < 24 compatibility.
-                @Suppress("DEPRECATION")
-                stopForeground(true)
+                // Do NOT call stopForeground() here. Keeping the notification
+                // visible ensures our MediaSession stays "foreground-active"
+                // in Android's eyes, so headset buttons keep routing to us
+                // even after other music apps are closed.
             }
             override fun onSkipToNext() {
                 Log.d(TAG, "MediaSession.onSkipToNext")
