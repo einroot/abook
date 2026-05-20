@@ -55,12 +55,15 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
+import java.util.Locale
 
 @AndroidEntryPoint
 class TtsPlaybackService : Service() {
 
     @Inject lateinit var bookDao: BookDao
     @Inject lateinit var statsDao: StatsDao
+    @Inject lateinit var voiceProfileDao: com.abook.data.db.dao.VoiceProfileDao
+    @Inject lateinit var appPreferences: com.abook.data.preferences.AppPreferences
 
     private val binder = LocalBinder()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -185,6 +188,12 @@ class TtsPlaybackService : Service() {
 
         ttsEngine.initialize {
             audioEffects.initialize(ttsEngine.getAudioSessionId())
+            // Load and apply the saved voice profile so the user's settings
+            // are active from the very first playback, without needing to
+            // open the Voice Settings screen.
+            serviceScope.launch {
+                applySavedVoiceProfile()
+            }
         }
 
         // TTS callbacks are delivered on an arbitrary TTS-engine thread, not
@@ -350,6 +359,58 @@ class TtsPlaybackService : Service() {
         } catch (_: Exception) {}
         silentAudioTrack = null
         Log.d(TAG, "Silent audio anchor stopped")
+    }
+
+    /**
+     * Load the saved voice profile from AppPreferences + Room DB and apply
+     * all TTS parameters and audio effects. Called once after TTS init so
+     * the user's saved voice profile is active from the very first playback,
+     * without needing to open the Voice Settings screen.
+     */
+    private suspend fun applySavedVoiceProfile() {
+        try {
+            val savedId = appPreferences.defaultVoiceProfileId.first() ?: return
+            val profile = voiceProfileDao.getProfile(savedId) ?: return
+
+            // Apply TTS params
+            ttsEngine.setSpeechRate(profile.speechRate)
+            ttsEngine.setPitch(profile.pitch)
+            ttsEngine.setVolume(profile.volume)
+            ttsEngine.setPan(profile.pan)
+
+            // ORDER MATTERS: setLanguage MUST come before setVoice.
+            // Android's TextToSpeech.setLanguage() resets the current voice
+            // to the default for that locale — calling it AFTER setVoice
+            // silently throws the specific voice away.
+            profile.locale?.let {
+                try { ttsEngine.setLanguage(Locale.forLanguageTag(it)) } catch (_: Exception) {}
+            }
+            profile.voiceName?.let { ttsEngine.setVoice(it) }
+            ttsEngine.setSsmlEnabled(profile.useSsml)
+            ttsEngine.setSsmlPauseMs(profile.ssmlPauseBetweenSentencesMs)
+
+            // Apply audio effects
+            if (profile.equalizerPreset >= 0) {
+                audioEffects.setEqualizerPreset(profile.equalizerPreset)
+            } else if (profile.equalizerBandLevels.isNotBlank()) {
+                profile.equalizerBandLevels.split(",").forEachIndexed { band, level ->
+                    level.toIntOrNull()?.let { audioEffects.setEqualizerBandLevel(band, it) }
+                }
+            }
+            audioEffects.setBassBoostStrength(profile.bassBoostStrength)
+            audioEffects.setVirtualizerStrength(profile.virtualizerStrength)
+            audioEffects.setPresetReverb(profile.reverbPreset.toShort())
+            audioEffects.setLoudnessGain(profile.loudnessGain)
+
+            Log.d(TAG, "Voice profile applied: ${profile.name} (id=$savedId)")
+
+            // If already playing, resync so changes are heard immediately.
+            if (_playbackState.value.isPlaying) {
+                speakChapter(currentChapterIndex, _playbackState.value.charOffsetInChapter)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to apply saved voice profile", e)
+        }
     }
 
     /**
@@ -971,6 +1032,12 @@ class TtsPlaybackService : Service() {
             ttsEngine.setSsmlEnabled(savedSsmlEnabled)
             ttsEngine.setSsmlPauseMs(savedSsmlPause)
             audioEffects.initialize(ttsEngine.getAudioSessionId())
+            // Re-apply saved voice profile on engine switch — the profile
+            // contains voice/language preferences that must survive the
+            // engine change.
+            serviceScope.launch {
+                applySavedVoiceProfile()
+            }
             onReady?.invoke()
         }
     }
