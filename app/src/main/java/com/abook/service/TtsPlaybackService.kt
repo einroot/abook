@@ -16,6 +16,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Binder
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.speech.tts.TextToSpeech
@@ -51,7 +52,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -69,6 +69,7 @@ class TtsPlaybackService : Service() {
 
     private val binder = LocalBinder()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private lateinit var ttsEngine: TtsEngine
     private lateinit var audioEffects: AudioEffectsManager
@@ -80,6 +81,7 @@ class TtsPlaybackService : Service() {
 
     private var volumeBeforeDuck: Float = 1.0f
     private var currentBookId: String? = null
+    private var lastRequestedBookId: String? = null
     private var currentChapterIndex: Int = 0
     private var chapters: List<com.abook.data.db.entity.ChapterEntity> = emptyList()
     private var currentChunks: List<TtsEngine.TextChunk> = emptyList()
@@ -466,19 +468,18 @@ class TtsPlaybackService : Service() {
         // a CancellationException in the caller and leave currentLoadJob = null
         // (even though playBook() just installed a new job), breaking all
         // subsequent guards on currentLoadJob?.isActive.
-        // We read currentBookId fresh inside the coroutine to avoid stale state.
+        // lastRequestedBookId is set synchronously BEFORE launch so any
+        // concurrently-running coroutine can detect that it has been superseded.
         val currentJob = currentLoadJob
         val bookIdAtLaunch = currentBookId
         if (bookIdAtLaunch != null && bookIdAtLaunch != bookId) {
             currentJob?.cancel()
         }
+        lastRequestedBookId = bookId
         currentLoadJob = serviceScope.launch {
-            // Re-read currentBookId inside the coroutine — it may have changed
-            // between the outer check and coroutine start due to another
-            // concurrent playBook() call.
-            if (currentBookId != null && currentBookId != bookId) {
-                return@launch
-            }
+            // If a newer playBook() call arrived while we were waiting in the
+            // dispatcher queue, bail — that newer call will do the work.
+            if (lastRequestedBookId != bookId) return@launch
             if (autoPlay) {
                 // Wait for TTS engine to be ready before attempting to speak.
                 // Without this, speak() silently drops text and user sees
@@ -1351,7 +1352,7 @@ class TtsPlaybackService : Service() {
         // MediaSessionCompat is not thread-safe. If called from a background
         // thread (e.g. audio focus callback on some OEM builds), dispatch to Main.
         if (Looper.getMainLooper().thread != Thread.currentThread()) {
-            runBlocking(Dispatchers.Main) { reregisterMediaSession() }
+            mainHandler.post { reregisterMediaSession() }
             return
         }
 
