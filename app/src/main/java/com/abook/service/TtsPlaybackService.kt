@@ -17,6 +17,7 @@ import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Binder
 import android.os.IBinder
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
@@ -50,6 +51,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -464,11 +466,19 @@ class TtsPlaybackService : Service() {
         // a CancellationException in the caller and leave currentLoadJob = null
         // (even though playBook() just installed a new job), breaking all
         // subsequent guards on currentLoadJob?.isActive.
+        // We read currentBookId fresh inside the coroutine to avoid stale state.
         val currentJob = currentLoadJob
-        if (currentBookId != null && currentBookId != bookId) {
+        val bookIdAtLaunch = currentBookId
+        if (bookIdAtLaunch != null && bookIdAtLaunch != bookId) {
             currentJob?.cancel()
         }
         currentLoadJob = serviceScope.launch {
+            // Re-read currentBookId inside the coroutine — it may have changed
+            // between the outer check and coroutine start due to another
+            // concurrent playBook() call.
+            if (currentBookId != null && currentBookId != bookId) {
+                return@launch
+            }
             if (autoPlay) {
                 // Wait for TTS engine to be ready before attempting to speak.
                 // Without this, speak() silently drops text and user sees
@@ -1338,6 +1348,13 @@ class TtsPlaybackService : Service() {
             return
         }
 
+        // MediaSessionCompat is not thread-safe. If called from a background
+        // thread (e.g. audio focus callback on some OEM builds), dispatch to Main.
+        if (Looper.getMainLooper().thread != Thread.currentThread()) {
+            runBlocking(Dispatchers.Main) { reregisterMediaSession() }
+            return
+        }
+
         try {
             val oldSession = mediaSession
             val activityPi = PendingIntent.getActivity(
@@ -1733,17 +1750,21 @@ class TtsPlaybackService : Service() {
                     )
                 )
             )
-            .setStyle(
-                androidx.media.app.NotificationCompat.MediaStyle()
-                    .setMediaSession(mediaSession.sessionToken)
-                    .setShowActionsInCompactView(0, 1, 2)
-                    .setShowCancelButton(true)
-                    .setCancelButtonIntent(
-                        MediaButtonReceiver.buildMediaButtonPendingIntent(
-                            this@TtsPlaybackService, PlaybackStateCompat.ACTION_STOP
-                        )
+            .apply {
+                if (sessionToken != null) {
+                    setStyle(
+                        androidx.media.app.NotificationCompat.MediaStyle()
+                            .setMediaSession(sessionToken)
+                            .setShowActionsInCompactView(0, 1, 2)
+                            .setShowCancelButton(true)
+                            .setCancelButtonIntent(
+                                MediaButtonReceiver.buildMediaButtonPendingIntent(
+                                    this@TtsPlaybackService, PlaybackStateCompat.ACTION_STOP
+                                )
+                            )
                     )
-            )
+                }
+            }
             // Keep the notification ongoing whenever a book is loaded — not
             // only while playing. If the user swipes it away during pause,
             // the service leaves foreground, the MediaSession goes inactive
