@@ -1003,6 +1003,8 @@ class TtsPlaybackService : Service() {
             } else {
                 pause()
             }
+            // Notify sleep timer manager about chapter completion (chapter-mode timer)
+            sleepTimerManager.notifyChapterCompleted()
         }
 
         savePosition()
