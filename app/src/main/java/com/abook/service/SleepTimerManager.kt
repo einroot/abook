@@ -34,7 +34,6 @@ class SleepTimerManager(
 ) {
 
     private var timerJob: Job? = null
-    private var fadeJob: Job? = null
     private var shakeListener: SensorEventListener? = null
     private var originalVolume: Float = 1.0f
 
@@ -168,11 +167,14 @@ class SleepTimerManager(
     }
 
     fun expireNow() {
+        val wasFading = _state.value.isFadingOut
         timerJob?.cancel()
-        fadeJob?.cancel()
         timerJob = null
-        fadeJob = null
         unregisterShakeDetector()
+
+        if (wasFading) {
+            onVolumeChange?.invoke(originalVolume)
+        }
 
         _state.value = SleepTimerState()
         if (dndEnabled) enableDnd()
@@ -185,8 +187,6 @@ class SleepTimerManager(
 
     private suspend fun completeTimer() {
         timerJob = null
-        fadeJob?.cancel()
-        fadeJob = null
         unregisterShakeDetector()
 
         _state.value = SleepTimerState()
@@ -259,13 +259,12 @@ class SleepTimerManager(
     }
 
     fun cancel() {
+        val wasFading = _state.value.isFadingOut
         timerJob?.cancel()
-        fadeJob?.cancel()
         timerJob = null
-        fadeJob = null
         unregisterShakeDetector()
 
-        if (_state.value.isFadingOut) {
+        if (wasFading) {
             onVolumeChange?.invoke(originalVolume)
         }
 
@@ -277,6 +276,7 @@ class SleepTimerManager(
     }
 
     private fun registerShakeDetector() {
+        unregisterShakeDetector()
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager ?: return
         val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
 
