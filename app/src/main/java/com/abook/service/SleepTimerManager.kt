@@ -36,6 +36,7 @@ class SleepTimerManager(
     private var timerJob: Job? = null
     private var shakeListener: SensorEventListener? = null
     private var originalVolume: Float = 1.0f
+    private var initialDurationSeconds: Int = 0
 
     // Configurable options
     var fadeOutDurationSeconds: Int = 120
@@ -58,6 +59,7 @@ class SleepTimerManager(
         val KEY_TIMER_END = longPreferencesKey("timer_end_epoch")
         val KEY_FADE_DURATION = intPreferencesKey("fade_duration")
         val KEY_IS_ACTIVE = booleanPreferencesKey("is_active")
+        val KEY_INITIAL_DURATION = intPreferencesKey("initial_duration_seconds")
     }
 
     fun start(durationMinutes: Int, currentVolume: Float) {
@@ -66,6 +68,7 @@ class SleepTimerManager(
         chapterMode = false
         vibrationTriggered = false
         val totalSeconds = durationMinutes * 60
+        initialDurationSeconds = totalSeconds
 
         _state.value = SleepTimerState(
             isActive = true,
@@ -79,6 +82,7 @@ class SleepTimerManager(
                 prefs[KEY_TIMER_END] = System.currentTimeMillis() + totalSeconds * 1000L
                 prefs[KEY_FADE_DURATION] = fadeOutDurationSeconds
                 prefs[KEY_IS_ACTIVE] = true
+                prefs[KEY_INITIAL_DURATION] = totalSeconds
             }
         }
 
@@ -156,6 +160,7 @@ class SleepTimerManager(
         }
         timerJob?.cancel()
         fadeOutDurationSeconds = fadeDur
+        initialDurationSeconds = prefs[KEY_INITIAL_DURATION] ?: remaining
         _state.value = SleepTimerState(
             isActive = true,
             remainingSeconds = remaining,
@@ -252,9 +257,44 @@ class SleepTimerManager(
 
         timerJob?.cancel()
         timerJob = scope.launch { runTimer(newRemaining) }
+        scope.launch {
+            context.sleepTimerStore.edit { prefs ->
+                prefs[KEY_TIMER_END] = System.currentTimeMillis() + newRemaining * 1000L
+                prefs[KEY_IS_ACTIVE] = true
+            }
+        }
         SleepTimerAlarmReceiver.scheduleAlarm(
             context,
             System.currentTimeMillis() + newRemaining * 1000L
+        )
+    }
+
+    private fun resetToInitialDuration() {
+        val current = _state.value
+        if (!current.isActive || initialDurationSeconds <= 0) return
+
+        vibrationTriggered = false
+
+        if (current.isFadingOut) {
+            onVolumeChange?.invoke(originalVolume)
+        }
+
+        _state.value = current.copy(
+            remainingSeconds = initialDurationSeconds,
+            isFadingOut = initialDurationSeconds <= fadeOutDurationSeconds
+        )
+
+        timerJob?.cancel()
+        timerJob = scope.launch { runTimer(initialDurationSeconds) }
+        scope.launch {
+            context.sleepTimerStore.edit { prefs ->
+                prefs[KEY_TIMER_END] = System.currentTimeMillis() + initialDurationSeconds * 1000L
+                prefs[KEY_IS_ACTIVE] = true
+            }
+        }
+        SleepTimerAlarmReceiver.scheduleAlarm(
+            context,
+            System.currentTimeMillis() + initialDurationSeconds * 1000L
         )
     }
 
@@ -293,7 +333,7 @@ class SleepTimerManager(
                     val now = System.currentTimeMillis()
                     if (now - lastShakeTime > 2000) {
                         lastShakeTime = now
-                        extend()
+                        resetToInitialDuration()
                     }
                 }
             }
