@@ -755,14 +755,6 @@ class TtsPlaybackService : Service() {
         val bookId = state.bookId ?: return
         if (chapters.isEmpty()) return
 
-        // CRITICAL: Reclaim media button priority BEFORE starting playback.
-        // doResume() can be called from the audio focus callback (background
-        // thread), but MediaSessionCompat is not thread-safe. We run the
-        // re-registration synchronously on Main to avoid a race where
-        // speakChapter() / updateMediaSession() fire while the session is
-        // being recreated.
-        reregisterMediaSession()
-
         _playbackState.update { it.copy(isPlaying = true) }
         requestAudioFocus()
         statsTracker.startSession(bookId, state.currentBookCharOffset)
@@ -1176,10 +1168,10 @@ class TtsPlaybackService : Service() {
                         startSilentAudioAnchor()
                         // If another media app became the last active session,
                         // Android may keep routing headset buttons to it even
-                        // after it stops. Re-register our session on focus
-                        // regain so a paused audiobook can reclaim the next
-                        // headset Play press instead of leaving it with music.
-                        reregisterMediaSession()
+                        // after it stops. Refresh our session on focus regain so
+                        // a paused audiobook can reclaim the next headset Play
+                        // press instead of leaving it with music.
+                        refreshMediaSessionForButtonPriority()
                         // Auto-resume if we were paused by a transient loss
                         // (call ended, etc). Matches Spotify / YouTube Music
                         // behaviour. Do nothing if user paused manually.
@@ -1340,14 +1332,54 @@ class TtsPlaybackService : Service() {
     }
 
     /**
-     * Completely re-register the MediaSession to reclaim media button priority.
-     * When another app (Spotify, YouTube Music) plays audio, Android routes
-     * buttons to it. Simply toggling isActive isn't enough — we must fully
-     * release and recreate the session so Android sees us as a "new" session
-     * and updates its internal "last active" tracking.
+     * Refresh our MediaSession to reclaim media button priority.
      *
-     * Safe to call multiple times — if the session is not yet initialized,
-     * this becomes a no-op (setupMediaSession() will create it later).
+     * Important: do NOT recreate/release the session here. Notification
+     * MediaStyle actions and MediaButtonReceiver keep PendingIntents tied to
+     * the original session token; replacing the token while paused often makes
+     * those stale intents ineffective and can make headset buttons keep going
+     * to the other player. Toggling active + publishing a fresh PlaybackState
+     * is the supported way to make the existing session current again.
+     */
+    private fun refreshMediaSessionForButtonPriority() {
+        if (!::mediaSession.isInitialized) return
+        if (Looper.getMainLooper().thread != Thread.currentThread()) {
+            mainHandler.post { refreshMediaSessionForButtonPriority() }
+            return
+        }
+        try {
+            mediaSession.isActive = false
+            mediaSession.isActive = true
+            updateMediaSession()
+            updateNotification()
+            Log.d(TAG, "MediaSession refreshed to reclaim button priority")
+        } catch (e: Exception) {
+            Log.e(TAG, "refreshMediaSessionForButtonPriority failed", e)
+        }
+    }
+
+    private fun reclaimMediaButtons() {
+        if (Looper.getMainLooper().thread != Thread.currentThread()) {
+            mainHandler.post { reclaimMediaButtons() }
+            return
+        }
+
+        refreshMediaSessionForButtonPriority()
+
+        // If a book is loaded, also become the current audio-focus owner. On
+        // many Android/Bluetooth stacks the hardware buttons follow audio
+        // focus, not just the active MediaSession. We do not start TTS here;
+        // this only makes the next headset Play/Pause target ABook again.
+        if (_playbackState.value.bookId != null) {
+            val granted = requestAudioFocus()
+            Log.d(TAG, "Audio focus requested for media-button reclaim: granted=$granted")
+        }
+    }
+
+    /**
+     * Legacy full re-registration kept for emergency fallback only. Normal
+     * priority reclaim uses refreshMediaSessionForButtonPriority() so the
+     * notification and MediaButtonReceiver keep the same session token.
      */
     private fun reregisterMediaSession() {
         // Guard: if mediaSession was never created (onCreate hasn't finished),
@@ -1624,6 +1656,7 @@ class TtsPlaybackService : Service() {
                 startSleepTimer(duration)
             }
             ACTION_EXPIRE_SLEEP_TIMER -> sleepTimerManager.expireNow()
+            ACTION_RECLAIM_MEDIA_BUTTONS -> reclaimMediaButtons()
             ACTION_RESTORE_SLEEP_TIMER -> {
                 serviceScope.launch {
                     sleepTimerManager.restoreTimerState()
@@ -1841,6 +1874,7 @@ class TtsPlaybackService : Service() {
         const val ACTION_PLAY_BOOK = "com.abook.action.PLAY_BOOK"
         const val ACTION_START_SLEEP_TIMER = "com.abook.action.START_SLEEP_TIMER"
         const val ACTION_EXPIRE_SLEEP_TIMER = "com.abook.action.EXPIRE_SLEEP_TIMER"
+        const val ACTION_RECLAIM_MEDIA_BUTTONS = "com.abook.action.RECLAIM_MEDIA_BUTTONS"
         const val ACTION_RESTORE_SLEEP_TIMER = "com.abook.action.RESTORE_SLEEP_TIMER"
         const val EXTRA_BOOK_ID = "extra_book_id"
         const val EXTRA_CHAPTER_INDEX = "extra_chapter_index"

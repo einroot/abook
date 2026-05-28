@@ -2,6 +2,7 @@ package com.abook
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -9,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import com.abook.service.TtsPlaybackService
 import com.abook.ui.navigation.ABookNavHost
 import com.abook.ui.theme.ABookTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -41,6 +43,30 @@ class MainActivity : ComponentActivity() {
             ABookTheme {
                 ABookNavHost()
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        reclaimHeadsetButtons()
+    }
+
+    /**
+     * If another media app played while ABook was paused, Android usually keeps
+     * headset/Bluetooth buttons routed to that app's last active MediaSession.
+     * When the user returns to ABook, explicitly refresh our MediaSession so the
+     * next headset Play/Pause goes back to the audiobook without having to start
+     * playback from the screen first.
+     */
+    private fun reclaimHeadsetButtons() {
+        try {
+            startService(
+                Intent(this, TtsPlaybackService::class.java).apply {
+                    action = TtsPlaybackService.ACTION_RECLAIM_MEDIA_BUTTONS
+                }
+            )
+        } catch (_: Exception) {
+            // Best effort only. Normal playback controls still work from the UI.
         }
     }
 }
