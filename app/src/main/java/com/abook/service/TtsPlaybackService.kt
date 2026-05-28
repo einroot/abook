@@ -1174,6 +1174,12 @@ class TtsPlaybackService : Service() {
                         ttsEngine.setVolume(volumeBeforeDuck)
                         // Restart silent anchor if it was stopped during focus loss.
                         startSilentAudioAnchor()
+                        // If another media app became the last active session,
+                        // Android may keep routing headset buttons to it even
+                        // after it stops. Re-register our session on focus
+                        // regain so a paused audiobook can reclaim the next
+                        // headset Play press instead of leaving it with music.
+                        reregisterMediaSession()
                         // Auto-resume if we were paused by a transient loss
                         // (call ended, etc). Matches Spotify / YouTube Music
                         // behaviour. Do nothing if user paused manually.
