@@ -25,3 +25,6 @@ app/keystore.properties
 # APK binaries (built artifacts, not source)
 *.apk
 *.aab
+
+# OpenCode agent runtime state (Sisyphus continuation data)
+.omo/
