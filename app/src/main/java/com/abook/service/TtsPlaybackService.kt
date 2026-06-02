@@ -39,6 +39,7 @@ import com.abook.domain.model.SleepTimerState
 import com.abook.service.textprocessing.TextProcessor
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -78,6 +79,17 @@ class TtsPlaybackService : Service() {
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
+    // Periodic re-claim of media button priority. Started when we lose
+    // focus to another app and a book is still loaded. It waits politely
+    // while another app appears to be actively producing audio, but still
+    // makes rare probe requests so stale/orphaned audio state cannot block
+    // recovery forever. The first successful request stops the loop.
+    private var focusReclaimJob: Job? = null
+
+    private enum class FocusReclaimState {
+        HasFocusOrNoReclaim,
+        FocusLostPermanent
+    }
 
     private var volumeBeforeDuck: Float = 1.0f
     private var currentBookId: String? = null
@@ -312,6 +324,7 @@ class TtsPlaybackService : Service() {
         // construction and open can block for ~100-200 ms on some devices,
         // which manifests as the Play button being "stuck" right after tap.
         silentAudioJob = serviceScope.launch(Dispatchers.IO) {
+            var anchorTrack: AudioTrack? = null
             try {
                 val sampleRate = 44100
                 val bufSize = AudioTrack.getMinBufferSize(
@@ -337,16 +350,16 @@ class TtsPlaybackService : Service() {
                     .setBufferSizeInBytes(bufSize)
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
+                anchorTrack = track
                 track.setVolume(0f)
                 track.play()
                 silentAudioTrack = track
                 Log.d(TAG, "Silent audio anchor started")
 
                 val silence = ShortArray(bufSize / 2)
-                while (isActive) {
-                    val t = silentAudioTrack ?: break
+                while (isActive && silentAudioTrack === track) {
                     try {
-                        val written = t.write(silence, 0, silence.size)
+                        val written = track.write(silence, 0, silence.size)
                         if (written < 0) break
                     } catch (_: Exception) {
                         break
@@ -354,6 +367,19 @@ class TtsPlaybackService : Service() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Silent audio anchor failed", e)
+            } finally {
+                // Do not let an old IO coroutine keep writing into a newer
+                // anchor after stop/start races during focus transitions.
+                val track = anchorTrack
+                if (track != null) {
+                    if (silentAudioTrack === track) {
+                        silentAudioTrack = null
+                    }
+                    try {
+                        track.stop()
+                        track.release()
+                    } catch (_: Exception) {}
+                }
             }
         }
     }
@@ -534,7 +560,7 @@ class TtsPlaybackService : Service() {
             ensureActive()
 
             if (autoPlay) {
-                requestAudioFocus()
+                requestPlaybackAudioFocus(allowPlaybackWithoutFocus = true)
                 // Guard: startForeground() throws if the service is already
                 // foreground. This can happen when playBook() is called from
                 // resumeLastPlayedBook() after the service was started via
@@ -665,6 +691,10 @@ class TtsPlaybackService : Service() {
     }
 
     fun pause() {
+        pauseInternal(stopReclaimLoop = true)
+    }
+
+    private fun pauseInternal(stopReclaimLoop: Boolean) {
         // Any pause clears the transient-focus-loss flag. Only the specific
         // AUDIOFOCUS_LOSS_TRANSIENT branch re-sets it AFTER calling us.
         // Manual pauses from any other source (UI, headset, timer, noisy)
@@ -677,6 +707,9 @@ class TtsPlaybackService : Service() {
         // - currentSpeakJob: in-flight text processing / chunk queuing.
         currentLoadJob?.cancel()
         currentLoadJob = null
+        if (stopReclaimLoop) {
+            applyFocusReclaimPolicy(FocusReclaimState.HasFocusOrNoReclaim)
+        }
         currentSpeakJob?.cancel()
         currentSpeakJob = null
         ttsEngine.stop()
@@ -756,7 +789,7 @@ class TtsPlaybackService : Service() {
         if (chapters.isEmpty()) return
 
         _playbackState.update { it.copy(isPlaying = true) }
-        requestAudioFocus()
+        requestPlaybackAudioFocus(allowPlaybackWithoutFocus = true)
         statsTracker.startSession(bookId, state.currentBookCharOffset)
         // Anchor ourselves as an audio producer on every resume so headset
         // button routing keeps pointing at us, even if silent audio anchor was
@@ -1144,18 +1177,44 @@ class TtsPlaybackService : Service() {
                 when (focusChange) {
                     AudioManager.AUDIOFOCUS_LOSS -> {
                         // Permanent loss — another app took over. Don't
-                        // auto-resume later.
+                        // auto-resume later. Reclaim-loop ownership is handled
+                        // by applyFocusReclaimPolicy() below, not by pauseInternal().
                         pausedByTransientFocusLoss = false
-                        pause()
+                        pauseInternal(stopReclaimLoop = false)
+                        // Re-assert our MediaSession so the system keeps
+                        // us in the routing queue. Some media apps (Yandex
+                        // Music included) get killed without calling
+                        // abandonAudioFocus(), so AUDIOFOCUS_GAIN never
+                        // fires and refreshMediaSessionForButtonPriority()
+                        // would never run. Doing it here means the next
+                        // headset press — once the other app is gone —
+                        // routes back to us instead of to a stale
+                        // "last active" session.
+                        refreshMediaSessionForButtonPriority()
+                        // Our silent anchor is useful while we own/hold focus,
+                        // but after a permanent loss it can make
+                        // AudioManager.isMusicActive look true because of OUR
+                        // zero-volume track. Stop it so the reclaim loop can
+                        // distinguish "another app is really playing" from
+                        // "the focus owner was killed and audio went idle".
+                        stopSilentAudioAnchor()
+                        // Start periodic re-claim. If the other app was
+                        // killed without abandoning focus, we won't get
+                        // AUDIOFOCUS_GAIN. Polling requestAudioFocus()
+                        // eventually succeeds once the system reclaims
+                        // the orphaned focus grant. No-op if a book isn't
+                        // loaded — nothing to play yet.
+                        applyFocusReclaimPolicy(FocusReclaimState.FocusLostPermanent)
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                         // Temporary interruption (phone call, nav beep).
                         // Remember so GAIN can auto-resume. Must set the
-                        // flag AFTER pause() because pause() clears it —
+                        // flag AFTER pauseInternal() because it clears it —
                         // otherwise manual pauses during the interruption
                         // would still auto-resume when focus returns.
                         val wasPlaying = _playbackState.value.isPlaying
-                        pause()
+                        applyFocusReclaimPolicy(FocusReclaimState.HasFocusOrNoReclaim)
+                        pauseInternal(stopReclaimLoop = false)
                         pausedByTransientFocusLoss = wasPlaying
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
@@ -1164,8 +1223,18 @@ class TtsPlaybackService : Service() {
                     }
                     AudioManager.AUDIOFOCUS_GAIN -> {
                         ttsEngine.setVolume(volumeBeforeDuck)
-                        // Restart silent anchor if it was stopped during focus loss.
-                        startSilentAudioAnchor()
+                        // Stop the periodic re-claim started on LOSS — we
+                        // got focus back through the normal path.
+                        applyFocusReclaimPolicy(FocusReclaimState.HasFocusOrNoReclaim)
+                        // Restart silent anchor only when it still serves a
+                        // routing purpose. For transient auto-resume we need it
+                        // before resume(); for an already loaded paused book we
+                        // keep the previous policy of anchoring media buttons.
+                        // If no book is loaded, don't become a background audio
+                        // producer just because focus changed.
+                        if (pausedByTransientFocusLoss || _playbackState.value.bookId != null) {
+                            startSilentAudioAnchor()
+                        }
                         // If another media app became the last active session,
                         // Android may keep routing headset buttons to it even
                         // after it stops. Refresh our session on focus regain so
@@ -1186,6 +1255,34 @@ class TtsPlaybackService : Service() {
             .also { audioFocusRequest = it }
 
         return audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    }
+
+    private fun requestPlaybackAudioFocus(allowPlaybackWithoutFocus: Boolean = true): Boolean {
+        val granted = requestAudioFocus()
+        if (granted) {
+            applyFocusReclaimPolicy(FocusReclaimState.HasFocusOrNoReclaim)
+        } else if (allowPlaybackWithoutFocus) {
+            // Preserve existing playback semantics: before the reclaim-loop
+            // changes, playBook()/resume() also ignored a denied focus request
+            // and attempted playback anyway. Keep that deliberate for user-
+            // initiated play/resume, while reclaim-loop probes remain guarded
+            // and do not start TTS.
+            Log.w(TAG, "Audio focus not granted; continuing user-requested playback")
+        }
+        return granted
+    }
+
+    private fun applyFocusReclaimPolicy(state: FocusReclaimState) {
+        when (state) {
+            FocusReclaimState.HasFocusOrNoReclaim -> stopFocusReclaimLoop()
+
+            FocusReclaimState.FocusLostPermanent -> {
+                stopFocusReclaimLoop()
+                if (_playbackState.value.bookId != null) {
+                    startFocusReclaimLoop()
+                }
+            }
+        }
     }
 
     private fun abandonAudioFocus() {
@@ -1371,9 +1468,90 @@ class TtsPlaybackService : Service() {
         // focus, not just the active MediaSession. We do not start TTS here;
         // this only makes the next headset Play/Pause target ABook again.
         if (_playbackState.value.bookId != null) {
-            val granted = requestAudioFocus()
+            val granted = requestPlaybackAudioFocus(allowPlaybackWithoutFocus = false)
             Log.d(TAG, "Audio focus requested for media-button reclaim: granted=$granted")
         }
+    }
+
+    /**
+     * Start (or replace) a periodic re-claim loop. Periodically checks
+     * whether audio became idle after a permanent focus loss; while another
+     * app appears active it backs off, but after several active checks it
+     * sends a rare probe request so stale/orphaned audio state cannot block
+     * recovery forever. The first success (or service destruction, or
+     * AUDIOFOCUS_GAIN callback, or a successful resume/play) stops the loop.
+     *
+     * Why: if the app that took our focus (e.g. Yandex Music) is killed
+     * by the system without calling abandonAudioFocus(), Android will
+     * never deliver AUDIOFOCUS_GAIN to us. The headset buttons keep
+     * routing to a stale "last active" session. Polling forces the system
+     * to re-evaluate the orphaned focus grant; once it does, the request
+     * is granted and AUDIOFOCUS_GAIN fires (or, if the listener was
+     * already unregistered, the next requestAudioFocus() simply succeeds).
+     */
+    private fun startFocusReclaimLoop() {
+        if (focusReclaimJob?.isActive == true) return
+        val job = serviceScope.launch(start = CoroutineStart.LAZY) {
+            var failedRequests = 0
+            var activeAudioChecks = 0
+            var delayAttempt = 0
+            try {
+                while (isActive) {
+                    val delayMs = FOCUS_RECLAIM_BASE_DELAY_MS * (1L shl delayAttempt.coerceAtMost(4))
+                    delay(delayMs)
+                    ensureActive()
+                    // Book was unloaded while we were waiting — nothing to reclaim for.
+                    if (_playbackState.value.bookId == null) break
+
+                    val request = audioFocusRequest ?: break
+
+                    // Do not fight a legitimate active player on every tick.
+                    // However, isMusicActive can itself be stale on some OEM
+                    // builds after the previous focus owner was killed. Treat
+                    // it as a backoff signal, not as a permanent blocker: after
+                    // several active checks, send one rare probe request.
+                    if (audioManager.isMusicActive &&
+                        activeAudioChecks < FOCUS_RECLAIM_ACTIVE_CHECKS_BEFORE_PROBE
+                    ) {
+                        activeAudioChecks++
+                        delayAttempt = (delayAttempt + 1).coerceAtMost(4)
+                        continue
+                    }
+                    activeAudioChecks = 0
+
+                    val result = audioManager.requestAudioFocus(request)
+                    if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                        Log.d(TAG, "Focus re-claim loop succeeded after $failedRequests failed requests")
+                        // If Android does not emit AUDIOFOCUS_GAIN for this
+                        // successful polling request, perform the important
+                        // recovery work here as well.
+                        startSilentAudioAnchor()
+                        refreshMediaSessionForButtonPriority()
+                        break
+                    }
+
+                    failedRequests++
+                    if (failedRequests >= FOCUS_RECLAIM_MAX_FAILED_REQUESTS) {
+                        Log.d(TAG, "Focus re-claim loop stopped after $failedRequests failed requests")
+                        break
+                    }
+                    delayAttempt = (delayAttempt + 1).coerceAtMost(4)
+                }
+            } finally {
+                // Avoid an old finishing coroutine clearing a newer job that
+                // was started between cancellation and this finally block.
+                if (focusReclaimJob === coroutineContext[Job]) {
+                    focusReclaimJob = null
+                }
+            }
+        }
+        focusReclaimJob = job
+        job.start()
+    }
+
+    private fun stopFocusReclaimLoop() {
+        focusReclaimJob?.cancel()
+        focusReclaimJob = null
     }
 
     /**
@@ -1852,6 +2030,7 @@ class TtsPlaybackService : Service() {
             try { unregisterReceiver(becomingNoisyReceiver) } catch (_: Exception) {}
             becomingNoisyRegistered = false
         }
+        applyFocusReclaimPolicy(FocusReclaimState.HasFocusOrNoReclaim)
         sleepTimerManager.release()
         audioEffects.release()
         ttsEngine.shutdown()
@@ -1890,5 +2069,23 @@ class TtsPlaybackService : Service() {
         // Debounce window for media button events (headset/Bluetooth).
         // Prevents race conditions from rapid presses or duplicate events.
         private const val MEDIA_BUTTON_DEBOUNCE_MS = 300L
+
+        // Base delay for the focus re-claim loop started when we lose
+        // AUDIOFOCUS_LOSS to another app. The loop doubles the delay on
+        // each failed attempt (capped at 16x) to back off politely if
+        // Yandex Music / Spotify is still legitimately holding focus.
+        // First retry at 3s, then 6s, 12s, 24s, 48s — well within the
+        // "user opens app, hits Play" timeframe.
+        private const val FOCUS_RECLAIM_BASE_DELAY_MS = 3_000L
+
+        // Safety cap for actual focus requests. Checks that only observe
+        // another active player via isMusicActive do not count against this;
+        // after several such checks the loop sends a rare probe request.
+        private const val FOCUS_RECLAIM_MAX_FAILED_REQUESTS = 5
+
+        // isMusicActive can be stale when a previous focus owner was killed.
+        // Wait politely first, then send one rare probe request instead of
+        // letting stale active-audio state block recovery forever.
+        private const val FOCUS_RECLAIM_ACTIVE_CHECKS_BEFORE_PROBE = 5
     }
 }
