@@ -191,8 +191,13 @@ class SleepTimerManager(
     }
 
     private suspend fun completeTimer() {
+        val wasFading = _state.value.isFadingOut
         timerJob = null
         unregisterShakeDetector()
+
+        if (wasFading) {
+            onVolumeChange?.invoke(originalVolume)
+        }
 
         _state.value = SleepTimerState()
         if (dndEnabled) enableDnd()
